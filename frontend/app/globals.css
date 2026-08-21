@@ -1,0 +1,22 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body { min-height: 100%; }
+body { margin: 0; background: #f7f8fa; color: #111827; }
+* { box-sizing: border-box; }
+.leaflet-container { height: 100%; width: 100%; }
+.price-marker {
+  background: white;
+  border: 1px solid #111827;
+  border-radius: 999px;
+  padding: 4px 7px;
+  font-weight: 800;
+  font-size: 11px;
+  box-shadow: 0 2px 7px rgba(0,0,0,.18);
+  white-space: nowrap;
+}
+.price-marker.saved {
+  border: 3px solid #f59e0b;
+  background: #fffbeb;
+}

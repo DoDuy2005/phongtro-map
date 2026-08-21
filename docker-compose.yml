@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: phongtro_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: phongtro
+      POSTGRES_USER: phongtro
+      POSTGRES_PASSWORD: phongtro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+
+  backend:
+    build: ./backend
+    container_name: phongtro_backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://phongtro:phongtro@db:5432/phongtro
+      JWT_SECRET: change-this-secret-in-production
+      CORS_ORIGINS: http://localhost:3000
+      CRAWLER_ENABLED: "true"
+      CRAWLER_INTERVAL_MINUTES: "60"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+
+  frontend:
+    build: ./frontend
+    container_name: phongtro_frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
