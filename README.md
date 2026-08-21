@@ -1,16 +1,34 @@
 # Phòng Trọ Map
 
-MVP theo đúng stack đã chọn:
+Hệ thống tìm kiếm và quản lý phòng trọ trên bản đồ.
 
-- Backend 1: FastAPI + Python
-- Backend 2: Python Crawler + APScheduler
-- Frontend: Next.js + TypeScript + Tailwind CSS
-- Testing: Pytest + Playwright (có thể bổ sung test suite)
-- Database: PostgreSQL + PostGIS
-- Bản đồ: Leaflet + OpenStreetMap
-- Container: Docker + Docker Compose
-- Git: Git + GitHub
+## Công nghệ
 
+- Next.js
+- TypeScript
+- Tailwind CSS
+- FastAPI
+- Python
+- PostgreSQL
+- PostGIS
+- Leaflet
+- OpenStreetMap
+- Docker
+- Docker Compose
+- Pytest
+- Playwright
+
+## Chức năng
+
+- Tìm kiếm phòng trọ
+- Lọc phòng
+- Hiển thị phòng trên bản đồ
+- Lưu phòng yêu thích
+- Quản lý chủ trọ
+- Quản trị viên
+- Crawler dữ liệu
+- Tự động cập nhật dữ liệu
+- 
 ## 1. Luồng người dùng
 
 Trang `/`:
