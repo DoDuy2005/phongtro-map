@@ -34,7 +34,7 @@ export default function MapClient({
     <MapContainer center={[21.0285, 105.8542]} zoom={12} scrollWheelZoom className="h-full w-full">
       <TileLayer
         attribution='&copy; OpenStreetMap contributors'
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
       <ViewSync rooms={valid} onBounds={onBounds} />
       {valid.map(room => (

@@ -18,6 +18,8 @@ export async function api<T>(
   path: string,
   init: RequestInit = {}
 ): Promise<T> {
+  // Dùng Headers để xử lý mọi kiểu HeadersInit:
+  // object, Headers hoặc array
   const headers = new Headers(init.headers);
 
   headers.set("Content-Type", "application/json");
@@ -28,10 +30,23 @@ export async function api<T>(
     headers.set(key, value);
   });
 
-  const res = await fetch(`${API}${path}`, {
-    ...init,
-    headers,
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  let res: Response;
+  try {
+    res = await fetch(`${API}${path}`, {
+      ...init,
+      headers,
+      signal: init.signal || controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error("API không phản hồi sau 12 giây. Kiểm tra backend có đang chạy không.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!res.ok) {
     const data = await res

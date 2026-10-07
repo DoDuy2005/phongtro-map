@@ -19,6 +19,8 @@ export default function AdminPage(){
   const [msg,setMsg]=useState("");
   const [form,setForm]=useState<any>(blank);
   const [editing,setEditing]=useState<string|null>(null);
+  const [crawlerRunning,setCrawlerRunning]=useState(false);
+  const [crawlerProgress,setCrawlerProgress]=useState<any>(null);
   const router=useRouter();
 
   async function load(){
@@ -29,13 +31,36 @@ export default function AdminPage(){
   }
   useEffect(()=>{load()},[]);
 
+  useEffect(()=>{
+    if(!crawlerRunning) return;
+    const timer=setInterval(async()=>{
+      try{
+        const state=await api<any>("/admin/crawler/status");
+        setCrawlerProgress(state);
+        if(state.status==="completed"){
+          setCrawlerRunning(false);
+          setMsg(`Đồng bộ xong: ${state.result?.created ?? 0} mới, ${state.result?.updated ?? 0} cập nhật.`);
+          await load();
+        }else if(state.status==="failed"){
+          setCrawlerRunning(false);
+          setMsg(`Crawler lỗi: ${state.error || "Không rõ nguyên nhân"}`);
+        }
+      }catch(e:any){
+        setCrawlerRunning(false);
+        setMsg(e.message);
+      }
+    },2000);
+    return ()=>clearInterval(timer);
+  },[crawlerRunning]);
+
   async function crawl(){
-    setMsg("Đang cào dữ liệu...");
+    setCrawlerRunning(true);
+    setCrawlerProgress({status:"running",progress:0,processed:0,target:3,stage:"Đang khởi động"});
+    setMsg("Đang cào dữ liệu nền; bạn vẫn có thể dùng các chức năng khác.");
     try{
       const x=await api<any>("/admin/crawler/run",{method:"POST"});
-      setMsg(`Đồng bộ xong: ${x.created} mới, ${x.updated} cập nhật.`);
-      load();
-    }catch(e:any){setMsg(e.message)}
+      if(x.status==="running" || x.status==="started") setMsg("Đã nhận yêu cầu. Đang theo dõi tiến độ crawler.");
+    }catch(e:any){setCrawlerRunning(false);setCrawlerProgress(null);setMsg(`Không khởi chạy được crawler: ${e.message}`)}
   }
 
   async function status(id:string,s:string){
@@ -105,8 +130,12 @@ export default function AdminPage(){
         <button className="mt-3 rounded bg-slate-900 px-4 py-2 font-bold text-white"><Plus className="mr-1 inline" size={16}/>{editing?"Cập nhật":"Thêm phòng"}</button>
       </form>
 
-      <div className="mt-5 flex items-center gap-3">
-        <button onClick={crawl} className="rounded-lg bg-emerald-600 px-4 py-3 font-bold text-white"><RefreshCw className="mr-1 inline" size={17}/> Chạy crawler Nhà Tốt</button>
+      <div className="mt-5 flex flex-wrap items-center gap-3">
+        <button onClick={crawl} disabled={crawlerRunning} className="rounded-lg bg-emerald-600 px-4 py-3 font-bold text-white disabled:cursor-wait disabled:opacity-60"><RefreshCw className={`mr-1 inline ${crawlerRunning?"animate-spin":""}`} size={17}/> {crawlerRunning?"Crawler đang chạy…":"Chạy crawler Nhà Tốt (3 tin)"}</button>
+        {crawlerRunning && <div className="w-full max-w-sm" aria-live="polite">
+          <div className="mb-1 flex justify-between text-xs text-gray-600"><span>{crawlerProgress?.stage || "Đang khởi động"} ({crawlerProgress?.processed ?? 0}/{crawlerProgress?.target ?? 3})</span><span>{crawlerProgress?.progress ?? 0}%</span></div>
+          <div className="h-2 overflow-hidden rounded-full bg-gray-200"><div className="h-full rounded-full bg-emerald-600 transition-all duration-500" style={{width:`${crawlerProgress?.progress ?? 0}%`}}/></div>
+        </div>}
         <span className="text-sm text-gray-600">{msg}</span>
       </div>
 

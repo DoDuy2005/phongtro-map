@@ -28,18 +28,18 @@ session.headers.update({
 ROOM_KEYWORDS = ["phòng trọ", "phong tro", "phòng cho thuê", "cho thuê phòng", "trọ", "tro", "ccmn", "căn hộ mini", "studio", "homestay", "ở ghép", "ký túc xá", "ktx", "sleepbox"]
 NON_ROOM_KEYWORDS = ["cho thuê nhà nguyên căn", "cho thuê mặt bằng", "cho thuê kho", "cho thuê văn phòng", "cho thuê cửa hàng", "cho thuê đất"]
 
-def get_json(url, params=None, retries=3):
+def get_json(url, params=None, retries=2):
     for attempt in range(retries):
         try:
-            r = session.get(url, params=params, timeout=30)
+            r = session.get(url, params=params, timeout=(4, 8))
             if r.status_code == 200:
                 return r.json()
             if r.status_code == 429:
-                time.sleep(5 * (attempt + 1))
+                time.sleep(1 * (attempt + 1))
             else:
-                time.sleep(1 + attempt)
+                time.sleep(0.5 * (attempt + 1))
         except requests.RequestException:
-            time.sleep(2 * (attempt + 1))
+            time.sleep(0.5 * (attempt + 1))
     return None
 
 def object_to_text(v):
@@ -154,10 +154,25 @@ def geocode_address(text):
         pass
     return None, None
 
-def crawl_once(db: Session, max_records: int = 100) -> dict:
+def geocode_address_cached(text, cache):
+    """Cache results within one crawl so repeated neighborhoods don't trigger duplicate requests."""
+    key = (text or "").strip().lower()
+    if not key:
+        return None, None
+    if key not in cache:
+        cache[key] = geocode_address(text)
+    return cache[key]
+
+def crawl_once(db: Session, max_records: int = 100, progress_callback=None, geocode_missing=True, only_new=False) -> dict:
+    def report(**state):
+        if progress_callback:
+            progress_callback(**state)
+
+    report(stage="Đang tìm tin mới", progress=5, processed=0, target=max_records)
     offset = 0
     seen = {}
     total = 0
+    geocode_cache = {}
 
     while len(seen) < max_records:
         data = get_json(BASE_URL, {
@@ -172,22 +187,47 @@ def crawl_once(db: Session, max_records: int = 100) -> dict:
         if not page_ads:
             break
 
+        candidates = {}
         for ad in page_ads:
             if not isinstance(ad, dict) or not is_room(ad):
                 continue
             lid = get_list_id(ad)
-            if lid:
-                seen[lid] = ad
+            if lid and lid not in seen and lid not in candidates:
+                candidates[lid] = ad
+
+        existing_ids = set()
+        if only_new and candidates:
+            existing_ids = {
+                row[0]
+                for row in db.query(Room.source_id)
+                .filter(Room.source == "nhatot", Room.source_id.in_(list(candidates)))
+                .all()
+            }
+
+        for lid, ad in candidates.items():
+            if only_new and lid in existing_ids:
+                continue
+            seen[lid] = ad
             if len(seen) >= max_records:
                 break
+
+        report(
+            stage="Đang tìm tin mới",
+            progress=min(80, 5 + int(70 * min(offset + LIMIT, total or offset + LIMIT) / max(total or offset + LIMIT, 1))),
+            processed=len(seen),
+            target=max_records,
+        )
 
         if total and offset + LIMIT >= total:
             break
         offset += LIMIT
-        time.sleep(random.uniform(0.7, 1.5))
+        if len(seen) < max_records:
+            time.sleep(random.uniform(0.2, 0.5))
 
     created = updated = 0
-    for lid, ad in seen.items():
+    total_to_process = len(seen)
+    report(stage="Đang lưu tin mới", progress=82, processed=0, target=total_to_process)
+    for index, (lid, ad) in enumerate(seen.items(), start=1):
         aid = get_ad_id(ad)
         detail = get_json(DETAIL_URL.format(aid), retries=2) if aid else None
         detail_ad = find_detail_obj(detail)
@@ -202,8 +242,8 @@ def crawl_once(db: Session, max_records: int = 100) -> dict:
         lat, lon = extract_coords(ad)
 
         # Không tự ý coi địa chỉ text là tọa độ chính xác.
-        if lat is None or lon is None:
-            lat, lon = geocode_address(addr + ", Hà Nội")
+        if geocode_missing and (lat is None or lon is None):
+            lat, lon = geocode_address_cached(addr + ", Hà Nội", geocode_cache)
 
         room = db.query(Room).filter(Room.source == "nhatot", Room.source_id == lid).first()
         if not room:
@@ -230,5 +270,7 @@ def crawl_once(db: Session, max_records: int = 100) -> dict:
         room.status = RoomStatus.ACTIVE
         room.available = True
 
+        report(stage="Đang lưu tin mới", progress=82 + int(16 * index / max(total_to_process, 1)), processed=index, target=total_to_process)
+
     db.commit()
-    return {"fetched": len(seen), "created": created, "updated": updated, "api_total": total}
+    return {"fetched": len(seen), "created": created, "updated": updated, "api_total": total, "scanned_offset": offset}

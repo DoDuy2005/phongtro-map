@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from uuid import UUID
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -15,6 +17,28 @@ from .auth import hash_password, verify_password, create_token, current_user, re
 from .crawler_service import crawl_once
 
 scheduler = BackgroundScheduler()
+crawler_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="crawler")
+crawler_lock = Lock()
+crawler_state_lock = Lock()
+crawler_state = {"status": "idle", "result": None, "error": None}
+
+def update_crawler_state(**changes):
+    global crawler_state
+    with crawler_state_lock:
+        crawler_state = {**crawler_state, **changes}
+
+def run_crawler_task():
+    db = SessionLocal()
+    try:
+        result = crawl_once(db, max_records=3, progress_callback=update_crawler_state, geocode_missing=False, only_new=True)
+        update_crawler_state(status="completed", progress=100, stage="Ho\u00e0n t\u1ea5t", result=result, error=None)
+    except Exception as exc:
+        db.rollback()
+        update_crawler_state(status="failed", result=None, error=str(exc))
+        print("Crawler error:", exc)
+    finally:
+        db.close()
+        crawler_lock.release()
 
 DEMO_ADMIN_EMAIL = "admin@phongtromap.local"
 DEMO_ADMIN_PASSWORD = "Admin@123"
@@ -243,8 +267,29 @@ def landlord_delete_room(room_id: UUID, db: Session = Depends(get_db), user: Use
     return {"deleted": True}
 
 @app.post("/api/admin/crawler/run")
-def run_crawler(db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.ADMIN))):
-    return crawl_once(db, max_records=200)
+def run_crawler(user: User = Depends(require_role(UserRole.ADMIN))):
+    if not crawler_lock.acquire(blocking=False):
+        with crawler_state_lock:
+            return {**crawler_state, "message": "Crawler \u0111ang ch\u1ea1y."}
+    update_crawler_state(status="running", progress=0, processed=0, target=3, stage="\u0110ang k\u1ebft n\u1ed1i Nh\u00e0 T\u1ed1t", result=None, error=None)
+    try:
+        future = crawler_executor.submit(run_crawler_task)
+        def release_if_not_started(done_future):
+            if done_future.cancelled() or done_future.exception() is not None:
+                update_crawler_state(status="failed", error="Kh\u00f4ng th\u1ec3 th\u1ef1c thi t\u00e1c v\u1ee5 crawler.")
+                if crawler_lock.locked():
+                    crawler_lock.release()
+        future.add_done_callback(release_if_not_started)
+    except Exception as exc:
+        update_crawler_state(status="failed", error=str(exc))
+        crawler_lock.release()
+        raise HTTPException(500, f"Kh\u00f4ng kh\u1edfi \u0111\u1ed9ng \u0111\u01b0\u1ee3c crawler: {exc}")
+    return {"status": "started", "progress": 0, "processed": 0, "target": 3}
+
+@app.get("/api/admin/crawler/status")
+def get_crawler_status(user: User = Depends(require_role(UserRole.ADMIN))):
+    with crawler_state_lock:
+        return dict(crawler_state)
 
 @app.get("/api/admin/stats")
 def admin_stats(db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.ADMIN))):
