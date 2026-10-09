@@ -1,109 +1,100 @@
 # Phòng Trọ Map
 
-Hệ thống tìm kiếm và quản lý phòng trọ trên bản đồ.
-
-## Công nghệ
-
-- Next.js
-- TypeScript
-- Tailwind CSS
-- FastAPI
-- Python
-- PostgreSQL
-- PostGIS
-- Leaflet
-- OpenStreetMap
-- Docker
-- Docker Compose
-- Pytest
-- Playwright
+Ứng dụng tìm kiếm và quản lý phòng trọ trên bản đồ. Dự án gồm giao diện Next.js, API FastAPI, PostgreSQL/PostGIS và crawler tin đăng.
 
 ## Chức năng
 
-- Tìm kiếm phòng trọ
-- Lọc phòng
-- Hiển thị phòng trên bản đồ
-- Lưu phòng yêu thích
-- Quản lý chủ trọ
-- Quản trị viên
-- Crawler dữ liệu
-- Tự động cập nhật dữ liệu
-- 
-## 1. Luồng người dùng
+- Tìm phòng trên bản đồ OpenStreetMap và xem danh sách tin.
+- Lọc theo từ khóa, quận/huyện, khoảng giá và diện tích; sắp xếp theo giá, diện tích hoặc thời gian cập nhật.
+- Xem chi tiết, ảnh phóng to, tiện ích, vị trí và thông tin liên hệ; lưu tin yêu thích.
+- Đăng ký tài khoản khách hoặc chủ trọ, xác minh email và đăng nhập theo vai trò.
+- Chủ trọ đăng, sửa, xóa tin; quản lý số phòng còn trống riêng cho từng tin.
+- Quản trị viên xem thống kê, quản lý tin và chạy crawler.
+- Ảnh tải lên được lưu trong cơ sở dữ liệu.
 
-Trang `/`:
-- "Tôi đang tìm phòng" -> `/rooms`
-- "Tôi là chủ trọ" -> `/landlord/login`
+## Công nghệ
 
-Người dùng:
-- bản đồ + marker giá
-- danh sách phòng
-- tìm kiếm
-- lọc quận/huyện, giá
-- click marker -> chi tiết
-- link về Nhà Tốt
-- lưu phòng
-- phòng đã lưu được marker viền vàng
-- nếu chưa đăng nhập khi lưu -> yêu cầu đăng nhập
+- Frontend: Next.js, React, TypeScript, Tailwind CSS, Leaflet.
+- Backend: FastAPI, SQLAlchemy, GeoAlchemy.
+- Cơ sở dữ liệu: PostgreSQL với PostGIS.
+- Email xác minh: Brevo API hoặc SMTP.
+- Triển khai phát triển: Docker Compose.
 
-Chủ trọ:
-- đăng ký/đăng nhập
-- thêm phòng
-- sửa phòng
-- xóa phòng
-- cập nhật "còn phòng/đã cho thuê"
-- nhập lat/lon để pin chính xác
+## Chạy bằng Docker
 
-Admin:
-- thống kê
-- xem danh sách tin
-- thêm phòng thủ công
-- sửa phòng
-- xóa phòng
-- ẩn/duyệt/từ chối
-- chạy crawler thủ công
-- crawler tự chạy theo APScheduler
-
-## 2. Chạy
+Cần cài Docker Desktop và bật Docker Engine. Từ thư mục chứa file `docker-compose.yml`:
 
 ```bash
-docker compose up --build
+cp .env.example .env
 ```
 
-Frontend: http://localhost:3000  
-Backend docs: http://localhost:8000/docs
+Trên PowerShell có thể dùng:
 
-## 3. Tài khoản demo
+```powershell
+Copy-Item .env.example .env
+```
 
-Backend tự tạo dữ liệu demo khi khởi động lần đầu:
+Điền thông tin gửi email trong `.env` nếu cần xác minh email, sau đó chạy:
 
-| Vai trò | Email | Mật khẩu | Trang |
-|---|---|---|---|
-| Admin | `admin@phongtromap.local` | `Admin@123` | `/admin/login` |
-| Chủ trọ | `chutro@phongtromap.local` | `Chutro@123` | `/landlord/login` |
-| Người dùng | `user@phongtromap.local` | `User@123` | `/rooms/login` |
+```bash
+docker compose up --build -d
+```
 
-Có sẵn 5 phòng mẫu quanh Hà Nội để kiểm tra bản đồ trước khi chạy crawler.
+Các địa chỉ sau được mở trên máy cục bộ:
 
-> Nếu bạn đã có volume PostgreSQL cũ, dữ liệu demo vẫn được kiểm tra theo email/tên phòng và không tạo trùng.
+- Ứng dụng: http://localhost:3000
+- Tài liệu API: http://localhost:8000/docs
+- Kiểm tra API: http://localhost:8000/api/health
+- PostgreSQL: `localhost:5432` (cơ sở dữ liệu phát triển `phongtro`).
 
-## 4. Crawler
+Tắt dịch vụ:
 
-Crawler đã được tách từ logic code Nhà Tốt hiện có:
-- `gateway.chotot.com/v1/public/ad-listing`
-- `gateway.chotot.com/v1/public/ad-detail/{ad_id}`
-- Hà Nội `region_v2=12000`
-- phòng trọ `cg=1050`
-- dùng `list_id` làm mã nguồn để chống trùng.
+```bash
+docker compose down
+```
 
-Crawler còn bổ sung:
-- upsert tin vào PostgreSQL
-- lưu ảnh
-- lưu URL Nhà Tốt
-- cố gắng lấy lat/lon từ dữ liệu nguồn
-- nếu không có tọa độ thì fallback geocode địa chỉ; không nên coi geocode fallback là tọa độ tuyệt đối chính xác.
+Dữ liệu PostgreSQL được lưu trong Docker volume `phongtro-map_pgdata`.
 
+## Cấu hình email
 
-## 5. Lưu ý database
+Docker Compose đọc các giá trị email từ file `.env` ở thư mục gốc dự án. Dùng Brevo API:
 
-Không cần cài SQL Server/PostgreSQL trực tiếp trên Windows nếu chạy bằng Docker Compose. Service `db` chính là PostgreSQL + PostGIS và được map ra cổng `5432`. Nếu chưa chạy Docker Compose thì frontend có thể mở được nhưng API/database sẽ không có dữ liệu. Crawler không chạy ngay lập tức; lịch mặc định là mỗi 60 phút. Có thể vào Admin và bấm **Chạy crawler Nhà Tốt** để đồng bộ ngay.
+```dotenv
+BREVO_API_KEY=your-brevo-api-key
+SMTP_FROM_EMAIL=email_đã_xác_minh@example.com
+SMTP_FROM_NAME=Phong Tro Map
+```
+
+Hoặc cấu hình SMTP bằng `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `SMTP_FROM_NAME` và `SMTP_USE_TLS`. Không đưa khóa API, mật khẩu SMTP hoặc file `.env` lên Git.
+
+## Tạo tài khoản quản trị
+
+Đăng ký tài khoản chủ trọ, sau đó quản trị viên cơ sở dữ liệu có thể cấp quyền quản trị cho đúng email trong môi trường phát triển:
+
+```sql
+UPDATE users
+SET role = 'admin'
+WHERE email = 'admin@example.com' AND role = 'landlord';
+```
+
+## Cấu trúc thư mục
+
+```text
+backend/       FastAPI, mô hình dữ liệu, crawler và migration khởi động
+frontend/      Ứng dụng Next.js
+docker-compose.yml
+```
+
+## Chạy riêng frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend mặc định gọi API tại `http://localhost:8000/api`. Có thể thay địa chỉ bằng biến `NEXT_PUBLIC_API_URL` trong `frontend/.env.local`.
+
+## Crawler
+
+Crawler lấy tin phòng trọ từ nguồn Nhà Tốt, lưu hoặc cập nhật tin trong PostgreSQL và có thể chạy theo lịch hoặc từ trang quản trị. Tọa độ địa chỉ được dùng khi nguồn cung cấp; nếu cần geocode bổ sung, kết quả địa chỉ chỉ là vị trí ước lượng.

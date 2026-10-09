@@ -8,7 +8,7 @@ import { useRouter } from "next/navigation";
 import { RefreshCw, Check, EyeOff, Trash2, LayoutDashboard, Pencil, Plus } from "lucide-react";
 
 const blank = {
-  title:"",description:"",price:0,area:null,region:"Hà Nội",district:"",ward:"",
+  title:"",description:"",price:0,room_count:1,available_count:1,area:null,region:"Hà Nội",district:"",ward:"",
   street:"",address:"",lat:null,lon:null,images:[],amenities:[],phone:"",
   seller_name:"",available:true,status:"ACTIVE",source_url:null
 };
@@ -27,7 +27,7 @@ export default function AdminPage(){
     try{
       const [s,r]=await Promise.all([api("/admin/stats"),api<{items:Room[]}>("/admin/rooms")]);
       setStats(s);setRooms(r.items);
-    }catch{router.push("/admin/login")}
+    }catch{router.push("/auth")}
   }
   useEffect(()=>{load()},[]);
 
@@ -84,7 +84,7 @@ export default function AdminPage(){
   function edit(r:Room){
     setEditing(r.id);
     setForm({
-      title:r.title,description:r.description,price:r.price,area:r.area,
+      title:r.title,description:r.description,price:r.price,room_count:r.room_count,available_count:r.available_count,area:r.area,
       region:r.region,district:r.district,ward:r.ward,street:r.street,address:r.address,
       lat:r.lat,lon:r.lon,images:r.images||[],amenities:r.amenities||[],phone:r.phone,
       seller_name:r.seller_name,available:r.available,status:r.status,source_url:r.source_url
@@ -117,6 +117,8 @@ export default function AdminPage(){
         <div className="mt-4 grid gap-2 md:grid-cols-3">
           <input required value={form.title} onChange={e=>update("title",e.target.value)} className="rounded border p-2 md:col-span-3" placeholder="Tiêu đề"/>
           <input type="number" value={form.price} onChange={e=>update("price",Number(e.target.value))} className="rounded border p-2" placeholder="Giá VNĐ/tháng"/>
+          <label className="text-sm">Số phòng <input type="number" min="1" max="500" value={form.room_count} onChange={e=>update("room_count",Number(e.target.value))} className="mt-1 w-full rounded border p-2"/></label>
+          <label className="text-sm">Phòng còn trống <input type="number" min="0" max={form.room_count} value={form.available_count} onChange={e=>update("available_count",Math.min(Number(e.target.value),form.room_count))} className="mt-1 w-full rounded border p-2"/></label>
           <input type="number" value={form.area||""} onChange={e=>update("area",e.target.value?Number(e.target.value):null)} className="rounded border p-2" placeholder="Diện tích m²"/>
           <input value={form.district} onChange={e=>update("district",e.target.value)} className="rounded border p-2" placeholder="Quận/Huyện"/>
           <input value={form.ward} onChange={e=>update("ward",e.target.value)} className="rounded border p-2" placeholder="Phường/Xã"/>

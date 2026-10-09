@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 
 from geoalchemy2 import Geometry
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint, JSON
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -28,11 +28,13 @@ class Room(Base):
     title: Mapped[str] = mapped_column(String(300))
     description: Mapped[str] = mapped_column(Text, default="")
     price: Mapped[float] = mapped_column(Float, default=0)
+    room_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    available_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     area: Mapped[float | None] = mapped_column(Float, nullable=True)
     region: Mapped[str] = mapped_column(String(100), default="Hà Nội")
     district: Mapped[str] = mapped_column(String(100), default="")
     ward: Mapped[str] = mapped_column(String(100), default="")
-    street: Mapped[str] = mapped_column(String(200), default="")
+    street: Mapped[str] = mapped_column(String(500), default="")
     address: Mapped[str] = mapped_column(String(500), default="")
     lat: Mapped[float | None] = mapped_column(Float, nullable=True)
     lon: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -50,6 +52,7 @@ class Room(Base):
 
     landlord = relationship("User", back_populates="rooms")
     favorites = relationship("Favorite", back_populates="room", cascade="all, delete-orphan")
+    uploaded_images = relationship("RoomImage", back_populates="room", cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint("source", "source_id", name="uq_room_source_id"),
@@ -59,16 +62,33 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(255), index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     full_name: Mapped[str] = mapped_column(String(200), default="")
     phone: Mapped[str] = mapped_column(String(50), default="")
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.USER, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_email_verified: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    email_verification_token: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     rooms = relationship("Room", back_populates="landlord")
     favorites = relationship("Favorite", back_populates="user", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("email", "role", name="uq_users_email_role"),
+    )
+
+class RoomImage(Base):
+    __tablename__ = "room_images"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    room_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"), index=True)
+    content_type: Mapped[str] = mapped_column(String(50))
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    room = relationship("Room", back_populates="uploaded_images")
 
 class Favorite(Base):
     __tablename__ = "favorites"

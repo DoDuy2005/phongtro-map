@@ -7,8 +7,6 @@ services:
       POSTGRES_DB: phongtro
       POSTGRES_USER: phongtro
       POSTGRES_PASSWORD: phongtro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
     ports:
       - "5432:5432"
     volumes:
@@ -25,6 +23,15 @@ services:
       CORS_ORIGINS: http://localhost:3000
       CRAWLER_ENABLED: "true"
       CRAWLER_INTERVAL_MINUTES: "60"
+      FRONTEND_URL: http://localhost:3000
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Phòng Trọ Map}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
     ports:
       - "8000:8000"
     depends_on:
@@ -43,3 +50,5 @@ services:
 
 volumes:
   pgdata:
+    name: phongtro-map_pgdata
+    external: true

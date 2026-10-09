@@ -11,7 +11,7 @@ export default function FavoritesPage() {
   const router = useRouter();
 
   useEffect(() => {
-    api<{items: Room[]}>("/me/favorites").then(x=>setRooms(x.items)).catch(()=>router.push("/rooms/login"));
+    api<{items: Room[]}>("/me/favorites").then(x=>setRooms(x.items)).catch(()=>router.push("/auth"));
   }, []);
 
   return (

@@ -5,6 +5,8 @@ export type Room = {
   title: string;
   description: string;
   price: number;
+  room_count: number;
+  available_count: number;
   area?: number | null;
   region: string;
   district: string;
@@ -14,6 +16,7 @@ export type Room = {
   lat?: number | null;
   lon?: number | null;
   images: string[];
+  uploaded_images: string[];
   amenities: string[];
   source_url?: string | null;
   phone: string;

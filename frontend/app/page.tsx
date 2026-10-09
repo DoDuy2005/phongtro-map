@@ -22,7 +22,7 @@ export default function Home() {
             <div className="mt-6 font-bold text-emerald-700">Khám phá phòng →</div>
           </button>
 
-          <button onClick={() => router.push("/landlord/login")} className="group rounded-3xl border bg-white p-8 text-left shadow-sm transition hover:-translate-y-1 hover:shadow-xl">
+          <button onClick={() => router.push("/auth")} className="group rounded-3xl border bg-white p-8 text-left shadow-sm transition hover:-translate-y-1 hover:shadow-xl">
             <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-sky-100 text-sky-700"><Building2/></div>
             <h2 className="text-2xl font-black">Tôi là chủ trọ</h2>
             <p className="mt-2 text-gray-500">Đăng nhập để đăng phòng, sửa thông tin, quản lý tình trạng phòng và tin đã đăng.</p>
@@ -30,9 +30,7 @@ export default function Home() {
           </button>
         </div>
 
-        <div className="mt-8 text-center"><button onClick={() => router.push("/admin/login")} className="text-sm font-semibold text-slate-600 underline">Quản trị hệ thống</button></div>
-
-        <div className="mt-4 text-center text-xs text-gray-400"><ShieldCheck className="mr-1 inline" size={14}/> Hệ thống demo phục vụ đồ án môn Phát triển phần mềm mã nguồn mở.</div>
+        <div className="mt-8 text-center text-xs text-gray-400"><ShieldCheck className="mr-1 inline" size={14}/> Hệ thống demo phục vụ đồ án môn Phát triển phần mềm mã nguồn mở.</div>
       </div>
     </main>
   );

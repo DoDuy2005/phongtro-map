@@ -1,5 +1,6 @@
 import { Room, User } from "@/types";
 
+
 export const API =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 
@@ -22,7 +23,9 @@ export async function api<T>(
   // object, Headers hoặc array
   const headers = new Headers(init.headers);
 
-  headers.set("Content-Type", "application/json");
+  if (!(typeof FormData !== "undefined" && init.body instanceof FormData)) {
+    headers.set("Content-Type", "application/json");
+  }
 
   const auth = authHeaders();
 
@@ -67,21 +70,32 @@ export const getMe = () =>
 
 export const login = (
   email: string,
-  password: string
+  password: string,
+  role: User["role"]
 ) =>
   api<{ access_token: string }>("/auth/login", {
     method: "POST",
     body: JSON.stringify({
       email,
       password,
+      role,
     }),
   });
 
-export const register = (data: any) =>
-  api<{ access_token: string }>("/auth/register", {
+export const register = (data: {
+  email: string;
+  password: string;
+  full_name: string;
+  phone?: string;
+  role: "user" | "landlord";
+}) =>
+  api<{ message: string }>("/auth/register", {
     method: "POST",
     body: JSON.stringify(data),
   });
+
+export const verifyEmail = (token: string) =>
+  api<{ message: string }>(`/auth/verify-email?token=${encodeURIComponent(token)}`);
 
 export const toggleFavorite = (id: string) =>
   api<{ saved: boolean }>(`/rooms/${id}/favorite`, {

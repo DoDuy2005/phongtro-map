@@ -8,10 +8,9 @@ import { Room } from "@/types";
 function ViewSync({ rooms, onBounds }: { rooms: Room[]; onBounds?: (b: L.LatLngBounds) => void }) {
   const map = useMap();
   useEffect(() => {
-    const timer = window.setTimeout(() => map.invalidateSize(), 100);
     const handler = () => onBounds?.(map.getBounds());
     map.on("moveend", handler);
-    return () => { window.clearTimeout(timer); map.off("moveend", handler); };
+    return () => { map.off("moveend", handler); };
   }, [map, onBounds]);
   return null;
 }
