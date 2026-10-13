@@ -4,10 +4,11 @@ import random
 import time
 import requests
 import unicodedata
+from threading import Lock
 from sqlalchemy.orm import Session
 from geoalchemy2.elements import WKTElement
 
-from .models import Room, RoomStatus
+from .models import CrawlerGeocodeCache, Room, RoomStatus
 
 BASE_URL = "https://gateway.chotot.com/v1/public/ad-listing"
 DETAIL_URL = "https://gateway.chotot.com/v1/public/ad-detail/{}"
@@ -15,6 +16,8 @@ REGION_ID = 12000
 CATEGORY_ID = 1050
 TYPE = "u"
 LIMIT = 20
+_geocode_lock = Lock()
+_last_geocode_request = 0.0
 
 session = requests.Session()
 session.headers.update({
@@ -55,6 +58,26 @@ def get_list_id(ad):
 
 def get_ad_id(ad):
     return str(ad.get("ad_id") or ad.get("adId") or "").strip()
+
+
+def extract_posted_at(ad):
+    value = next((ad.get(key) for key in (
+        "list_time", "posted_at", "postedAt", "post_time", "publish_time", "created_at", "createdAt", "date"
+    ) if ad.get(key) is not None), None)
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit()):
+            timestamp = float(value)
+            if timestamp > 100_000_000_000:
+                timestamp /= 1000
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc).replace(tzinfo=None)
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except (ValueError, OverflowError, OSError):
+        return None
 
 def is_room(ad):
     if str(ad.get("category", "")).strip() == str(CATEGORY_ID):
@@ -136,43 +159,56 @@ def find_detail_obj(data):
     return data if any(k in data for k in ["ad_id", "list_id", "subject"]) else None
 
 def geocode_address(text):
-    # Fallback cho tin không có lat/lon. Có cache ở phía database bằng cách lưu kết quả.
-    # Nominatim yêu cầu User-Agent nhận diện ứng dụng; không nên dùng để geocode hàng loạt quá nhanh.
+    # Fallback for listings without source coordinates. Requests are serialized and rate limited.
     if not text:
         return None, None
+    global _last_geocode_request
     try:
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": text, "format": "jsonv2", "limit": 1, "countrycodes": "vn"},
-            headers={"User-Agent": "PhongTroStudentProject/1.0"},
-            timeout=15,
-        )
-        data = r.json()
-        if data:
-            return float(data[0]["lat"]), float(data[0]["lon"])
+        with _geocode_lock:
+            wait = 15 - (time.monotonic() - _last_geocode_request)
+            if wait > 0:
+                time.sleep(wait)
+            _last_geocode_request = time.monotonic()
+            response = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": text, "format": "jsonv2", "limit": 1, "countrycodes": "vn"},
+                headers={"User-Agent": "PhongTroMap/1.0 (room listing geocoding)"},
+                timeout=15,
+            )
+            data = response.json()
+            if data:
+                return float(data[0]["lat"]), float(data[0]["lon"])
     except Exception:
         pass
     return None, None
 
-def geocode_address_cached(text, cache):
-    """Cache results within one crawl so repeated neighborhoods don't trigger duplicate requests."""
-    key = (text or "").strip().lower()
+def geocode_address_cached(text, cache, db=None):
+    """Reuse successful persistent lookups before calling Nominatim again."""
+    key = " ".join((text or "").strip().lower().split())
     if not key:
         return None, None
     if key not in cache:
-        cache[key] = geocode_address(text)
+        saved = db.get(CrawlerGeocodeCache, key) if db is not None else None
+        if saved:
+            cache[key] = (saved.lat, saved.lon)
+        else:
+            cache[key] = geocode_address(text)
+            if db is not None and cache[key][0] is not None and cache[key][1] is not None:
+                db.add(CrawlerGeocodeCache(address_key=key, lat=cache[key][0], lon=cache[key][1]))
     return cache[key]
 
-def crawl_once(db: Session, max_records: int = 100, progress_callback=None, geocode_missing=True, only_new=False) -> dict:
+def crawl_once(db: Session, max_records: int = 100, progress_callback=None, geocode_missing=True, only_new=False, start_offset=0) -> dict:
     def report(**state):
         if progress_callback:
             progress_callback(**state)
 
     report(stage="Đang tìm tin mới", progress=5, processed=0, target=max_records)
-    offset = 0
+    offset = max(0, int(start_offset))
     seen = {}
     total = 0
     geocode_cache = {}
+    next_offset = offset
+    backfill_complete = False
 
     while len(seen) < max_records:
         data = get_json(BASE_URL, {
@@ -185,6 +221,8 @@ def crawl_once(db: Session, max_records: int = 100, progress_callback=None, geoc
         total = data.get("total", 0) or total
         page_ads = (data.get("ads") or []) + (data.get("sticky_ads") or []) + (data.get("gallery_ads") or [])
         if not page_ads:
+            backfill_complete = True
+            next_offset = 0
             break
 
         candidates = {}
@@ -218,9 +256,15 @@ def crawl_once(db: Session, max_records: int = 100, progress_callback=None, geoc
             target=max_records,
         )
 
+        if len(seen) >= max_records:
+            next_offset = offset
+            break
         if total and offset + LIMIT >= total:
+            backfill_complete = True
+            next_offset = 0
             break
         offset += LIMIT
+        next_offset = offset
         if len(seen) < max_records:
             time.sleep(random.uniform(0.2, 0.5))
 
@@ -252,6 +296,8 @@ def crawl_once(db: Session, max_records: int = 100, progress_callback=None, geoc
             created += 1
         else:
             updated += 1
+            if lat is None or lon is None:
+                lat, lon = room.lat, room.lon
 
         room.title = str(ad.get("subject") or "Phòng trọ")
         room.description = str(ad.get("body") or "")
@@ -261,7 +307,8 @@ def crawl_once(db: Session, max_records: int = 100, progress_callback=None, geoc
         except (TypeError, ValueError):
             room.area = None
         room.region, room.district, room.ward, room.street, room.address = region, district, ward, street, addr
-        room.lat, room.lon = lat, lon
+        if lat is not None and lon is not None:
+            room.lat, room.lon = lat, lon
         room.location = WKTElement(f"POINT({lon} {lat})", srid=4326) if lat is not None and lon is not None else None
         room.images = extract_images(ad)
         room.source_url = source_url(ad)
@@ -273,4 +320,4 @@ def crawl_once(db: Session, max_records: int = 100, progress_callback=None, geoc
         report(stage="Đang lưu tin mới", progress=82 + int(16 * index / max(total_to_process, 1)), processed=index, target=total_to_process)
 
     db.commit()
-    return {"fetched": len(seen), "created": created, "updated": updated, "api_total": total, "scanned_offset": offset}
+    return {"fetched": len(seen), "created": created, "updated": updated, "api_total": total, "scanned_offset": offset, "next_offset": next_offset, "backfill_complete": backfill_complete}

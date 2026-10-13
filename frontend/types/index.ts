@@ -27,6 +27,9 @@ export type Room = {
   created_at: string;
   updated_at: string;
   is_favorite: boolean;
+  favorite_id?: string | null;
+  is_removed?: boolean;
+  is_unavailable?: boolean;
 };
 
 export type User = {

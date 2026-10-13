@@ -1,167 +1,205 @@
-
 "use client";
 
-import { useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { CalendarClock, Check, ChevronLeft, ChevronRight, EyeOff, Pencil, Search, Trash2, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { Room } from "@/types";
-import { useRouter } from "next/navigation";
-import { RefreshCw, Check, EyeOff, Trash2, LayoutDashboard, Pencil, Plus } from "lucide-react";
 
-const blank = {
-  title:"",description:"",price:0,room_count:1,available_count:1,area:null,region:"Hà Nội",district:"",ward:"",
-  street:"",address:"",lat:null,lon:null,images:[],amenities:[],phone:"",
-  seller_name:"",available:true,status:"ACTIVE",source_url:null
-};
+const PAGE_SIZE = 100;
 
-export default function AdminPage(){
-  const [stats,setStats]=useState<any>(null);
-  const [rooms,setRooms]=useState<Room[]>([]);
-  const [msg,setMsg]=useState("");
-  const [form,setForm]=useState<any>(blank);
-  const [editing,setEditing]=useState<string|null>(null);
-  const [crawlerRunning,setCrawlerRunning]=useState(false);
-  const [crawlerProgress,setCrawlerProgress]=useState<any>(null);
-  const router=useRouter();
+function pageWindow(totalPages: number, currentPage: number) {
+  return Array.from({ length: totalPages }, (_, index) => index + 1)
+    .filter(page => page === 1 || page === totalPages || Math.abs(page - currentPage) <= 1);
+}
 
-  async function load(){
-    try{
-      const [s,r]=await Promise.all([api("/admin/stats"),api<{items:Room[]}>("/admin/rooms")]);
-      setStats(s);setRooms(r.items);
-    }catch{router.push("/auth")}
-  }
-  useEffect(()=>{load()},[]);
+function roomStatusLabel(status: string) {
+  const labels: Record<string, string> = { ACTIVE: "Đang hiển thị", active: "Đang hiển thị", HIDDEN: "Đã ẩn", hidden: "Đã ẩn", PENDING: "Chờ duyệt", pending: "Chờ duyệt", REJECTED: "Từ chối", rejected: "Từ chối" };
+  return labels[status] || status;
+}
 
-  useEffect(()=>{
-    if(!crawlerRunning) return;
-    const timer=setInterval(async()=>{
-      try{
-        const state=await api<any>("/admin/crawler/status");
-        setCrawlerProgress(state);
-        if(state.status==="completed"){
-          setCrawlerRunning(false);
-          setMsg(`Đồng bộ xong: ${state.result?.created ?? 0} mới, ${state.result?.updated ?? 0} cập nhật.`);
-          await load();
-        }else if(state.status==="failed"){
-          setCrawlerRunning(false);
-          setMsg(`Crawler lỗi: ${state.error || "Không rõ nguyên nhân"}`);
-        }
-      }catch(e:any){
-        setCrawlerRunning(false);
-        setMsg(e.message);
-      }
-    },2000);
-    return ()=>clearInterval(timer);
-  },[crawlerRunning]);
+export default function AdminPage() {
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [searchDraft, setSearchDraft] = useState("");
+  const [search, setSearch] = useState("");
+  const [postedWithin, setPostedWithin] = useState("");
+  const [retentionDays, setRetentionDays] = useState("");
+  const [savedRetentionDays, setSavedRetentionDays] = useState("");
+  const [savingRetention, setSavingRetention] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const router = useRouter();
+  const totalPages = Math.ceil(total / PAGE_SIZE);
 
-  async function crawl(){
-    setCrawlerRunning(true);
-    setCrawlerProgress({status:"running",progress:0,processed:0,target:3,stage:"Đang khởi động"});
-    setMsg("Đang cào dữ liệu nền; bạn vẫn có thể dùng các chức năng khác.");
-    try{
-      const x=await api<any>("/admin/crawler/run",{method:"POST"});
-      if(x.status==="running" || x.status==="started") setMsg("Đã nhận yêu cầu. Đang theo dõi tiến độ crawler.");
-    }catch(e:any){setCrawlerRunning(false);setCrawlerProgress(null);setMsg(`Không khởi chạy được crawler: ${e.message}`)}
-  }
+  const loadRooms = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String((page - 1) * PAGE_SIZE) });
+    if (search) params.set("q", search);
+    if (postedWithin) params.set("posted_within_days", postedWithin);
+    try {
+      const result = await api<{ items: Room[]; total: number }>(`/admin/rooms?${params.toString()}`);
+      setRooms(result.items);
+      setTotal(result.total);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Không tải được danh sách phòng.");
+    } finally {
+      setLoading(false);
+    }
+  }, [page, postedWithin, search]);
 
-  async function status(id:string,s:string){
-    await api(`/admin/rooms/${id}/status?status=${s}`,{method:"PUT"});load();
-  }
+  useEffect(() => { void loadRooms(); }, [loadRooms]);
 
-  async function remove(id:string){
-    if(!confirm("Xóa vĩnh viễn tin này?")) return;
-    await api(`/admin/rooms/${id}`,{method:"DELETE"});load();
+  useEffect(() => {
+    api<{ days: number | null }>("/admin/room-retention").then(result => {
+      const days = result.days == null ? "" : String(result.days);
+      setRetentionDays(days);
+      setSavedRetentionDays(days);
+    }).catch(err => setError(err instanceof Error ? err.message : "Không tải được thiết lập tự xóa tin."));
+  }, []);
+
+  function submitSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const nextSearch = searchDraft.trim();
+    setNotice("");
+    if (page !== 1) setPage(1);
+    if (search !== nextSearch) setSearch(nextSearch);
+    else if (page === 1) void loadRooms();
   }
 
-  async function save(e:React.FormEvent){
-    e.preventDefault();
-    try{
-      if(editing) await api(`/admin/rooms/${editing}`,{method:"PUT",body:JSON.stringify(form)});
-      else await api("/admin/rooms",{method:"POST",body:JSON.stringify(form)});
-      setForm(blank);setEditing(null);setMsg("Đã lưu phòng.");load();
-    }catch(e:any){setMsg(e.message)}
+  function clearSearch() {
+    setSearchDraft("");
+    setNotice("");
+    if (page !== 1) setPage(1);
+    if (search) setSearch("");
+    else if (page === 1) void loadRooms();
   }
 
-  function edit(r:Room){
-    setEditing(r.id);
-    setForm({
-      title:r.title,description:r.description,price:r.price,room_count:r.room_count,available_count:r.available_count,area:r.area,
-      region:r.region,district:r.district,ward:r.ward,street:r.street,address:r.address,
-      lat:r.lat,lon:r.lon,images:r.images||[],amenities:r.amenities||[],phone:r.phone,
-      seller_name:r.seller_name,available:r.available,status:r.status,source_url:r.source_url
-    });
-    window.scrollTo({top:0,behavior:"smooth"});
+  async function saveRetention(nextDays: string) {
+    if (savingRetention || nextDays === savedRetentionDays) return;
+    const confirmation = nextDays
+      ? `Xác nhận đổi thời hạn sang ${nextDays} ngày? Tin Nhà Tốt quá hạn sẽ bị xóa vĩnh viễn ngay khi lưu. Tin chủ trọ tự đăng vẫn được giữ và chủ trọ sẽ nhận email nhắc xác nhận.`
+      : "Xác nhận tắt tự động xóa tin Nhà Tốt và dừng nhắc chủ trọ về tin quá hạn?";
+    if (!confirm(confirmation)) {
+      setRetentionDays(savedRetentionDays);
+      return;
+    }
+    setSavingRetention(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await api<{ days: number | null; deleted: number }>("/admin/room-retention", {
+        method: "PUT",
+        body: JSON.stringify({ days: nextDays ? Number(nextDays) : null }),
+      });
+      const savedDays = result.days == null ? "" : String(result.days);
+      setRetentionDays(savedDays);
+      setSavedRetentionDays(savedDays);
+      setNotice(result.days ? `Đã bật thời hạn ${result.days} ngày; xóa ${result.deleted} tin Nhà Tốt quá hạn. Tin chủ trọ được giữ và sẽ được nhắc qua email.` : "Đã tắt tự động xóa và nhắc tin quá hạn.");
+      if (result.deleted) await loadRooms();
+    } catch (err) {
+      setRetentionDays(savedRetentionDays);
+      setError(err instanceof Error ? err.message : "Không lưu được thời hạn tự xóa.");
+    } finally {
+      setSavingRetention(false);
+    }
   }
 
-  const update=(k:string,v:any)=>setForm((f:any)=>({...f,[k]:v}));
+  async function changeStatus(room: Room) {
+    const nextStatus = room.status.toLowerCase() === "active" ? "hidden" : "active";
+    try {
+      await api(`/admin/rooms/${room.id}/status?status=${nextStatus}`, { method: "PUT" });
+      setNotice(nextStatus === "active" ? "Đã hiển thị lại phòng." : "Đã ẩn phòng.");
+      await loadRooms();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Không cập nhật được trạng thái phòng.");
+    }
+  }
 
-  return <main className="min-h-screen bg-gray-100">
-    <header className="flex items-center justify-between border-b bg-slate-950 px-5 py-4 text-white">
-      <h1 className="font-black"><LayoutDashboard className="mr-2 inline"/> Admin Phòng Trọ Map</h1>
-      <button onClick={()=>{localStorage.removeItem("token");router.push("/")}}>Đăng xuất</button>
-    </header>
+  async function removeRoom(room: Room) {
+    if (!confirm(`Xóa vĩnh viễn tin “${room.title}”?`)) return;
+    try {
+      await api(`/admin/rooms/${room.id}`, { method: "DELETE" });
+      setNotice("Đã xóa tin phòng.");
+      if (rooms.length === 1 && page > 1) setPage(current => current - 1);
+      else await loadRooms();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Không xóa được phòng.");
+    }
+  }
 
-    <div className="mx-auto max-w-7xl p-5">
-      <div className="grid gap-3 md:grid-cols-5">
-        {[["Phòng",stats?.rooms],["Đang hiển thị",stats?.active_rooms],["Chủ trọ",stats?.landlords],["Người dùng",stats?.users],["Tin Nhà Tốt",stats?.nhatot_rooms]].map(([a,b])=>
-          <div key={String(a)} className="rounded-xl bg-white p-4 shadow-sm">
-            <div className="text-sm text-gray-500">{a}</div><div className="mt-1 text-2xl font-black">{b??"—"}</div>
-          </div>
-        )}
+  const pages = pageWindow(totalPages, page);
+
+  return <main className="mx-auto max-w-7xl p-4 sm:p-6">
+    <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h1 className="text-2xl font-black text-slate-900">Tất cả phòng</h1>
+        <p className="mt-1 text-sm text-slate-500">Tra cứu và quản lý tin phòng trên hệ thống.</p>
       </div>
-
-      <form onSubmit={save} className="mt-5 rounded-xl bg-white p-5 shadow-sm">
-        <div className="flex items-center justify-between">
-          <h2 className="font-black">{editing?"Sửa phòng":"Thêm phòng thủ công"}</h2>
-          {editing && <button type="button" onClick={()=>{setEditing(null);setForm(blank)}}>Hủy</button>}
-        </div>
-        <div className="mt-4 grid gap-2 md:grid-cols-3">
-          <input required value={form.title} onChange={e=>update("title",e.target.value)} className="rounded border p-2 md:col-span-3" placeholder="Tiêu đề"/>
-          <input type="number" value={form.price} onChange={e=>update("price",Number(e.target.value))} className="rounded border p-2" placeholder="Giá VNĐ/tháng"/>
-          <label className="text-sm">Số phòng <input type="number" min="1" max="500" value={form.room_count} onChange={e=>update("room_count",Number(e.target.value))} className="mt-1 w-full rounded border p-2"/></label>
-          <label className="text-sm">Phòng còn trống <input type="number" min="0" max={form.room_count} value={form.available_count} onChange={e=>update("available_count",Math.min(Number(e.target.value),form.room_count))} className="mt-1 w-full rounded border p-2"/></label>
-          <input type="number" value={form.area||""} onChange={e=>update("area",e.target.value?Number(e.target.value):null)} className="rounded border p-2" placeholder="Diện tích m²"/>
-          <input value={form.district} onChange={e=>update("district",e.target.value)} className="rounded border p-2" placeholder="Quận/Huyện"/>
-          <input value={form.ward} onChange={e=>update("ward",e.target.value)} className="rounded border p-2" placeholder="Phường/Xã"/>
-          <input value={form.address} onChange={e=>update("address",e.target.value)} className="rounded border p-2 md:col-span-2" placeholder="Địa chỉ"/>
-          <input type="number" step="any" value={form.lat??""} onChange={e=>update("lat",e.target.value?Number(e.target.value):null)} className="rounded border p-2" placeholder="Latitude"/>
-          <input type="number" step="any" value={form.lon??""} onChange={e=>update("lon",e.target.value?Number(e.target.value):null)} className="rounded border p-2" placeholder="Longitude"/>
-          <input value={(form.images||[]).join(",")} onChange={e=>update("images",e.target.value.split(",").map((x:string)=>x.trim()).filter(Boolean))} className="rounded border p-2 md:col-span-3" placeholder="URL ảnh, cách nhau bằng dấu phẩy"/>
-          <input value={(form.amenities||[]).join(",")} onChange={e=>update("amenities",e.target.value.split(",").map((x:string)=>x.trim()).filter(Boolean))} className="rounded border p-2 md:col-span-3" placeholder="Tiện ích"/>
-          <textarea value={form.description} onChange={e=>update("description",e.target.value)} className="min-h-24 rounded border p-2 md:col-span-3" placeholder="Mô tả"/>
-        </div>
-        <button className="mt-3 rounded bg-slate-900 px-4 py-2 font-bold text-white"><Plus className="mr-1 inline" size={16}/>{editing?"Cập nhật":"Thêm phòng"}</button>
-      </form>
-
-      <div className="mt-5 flex flex-wrap items-center gap-3">
-        <button onClick={crawl} disabled={crawlerRunning} className="rounded-lg bg-emerald-600 px-4 py-3 font-bold text-white disabled:cursor-wait disabled:opacity-60"><RefreshCw className={`mr-1 inline ${crawlerRunning?"animate-spin":""}`} size={17}/> {crawlerRunning?"Crawler đang chạy…":"Chạy crawler Nhà Tốt (3 tin)"}</button>
-        {crawlerRunning && <div className="w-full max-w-sm" aria-live="polite">
-          <div className="mb-1 flex justify-between text-xs text-gray-600"><span>{crawlerProgress?.stage || "Đang khởi động"} ({crawlerProgress?.processed ?? 0}/{crawlerProgress?.target ?? 3})</span><span>{crawlerProgress?.progress ?? 0}%</span></div>
-          <div className="h-2 overflow-hidden rounded-full bg-gray-200"><div className="h-full rounded-full bg-emerald-600 transition-all duration-500" style={{width:`${crawlerProgress?.progress ?? 0}%`}}/></div>
-        </div>}
-        <span className="text-sm text-gray-600">{msg}</span>
-      </div>
-
-      <div className="mt-7 overflow-x-auto rounded-xl bg-white shadow-sm">
-        <table className="w-full text-left text-sm">
-          <thead className="border-b bg-gray-50"><tr><th className="p-3">Phòng</th><th className="p-3">Giá</th><th className="p-3">Nguồn</th><th className="p-3">Trạng thái</th><th className="p-3">CRUD</th></tr></thead>
-          <tbody>
-            {rooms.map(r=><tr key={r.id} className="border-b">
-              <td className="p-3"><b>{r.title}</b><div className="text-xs text-gray-500">{r.address}</div></td>
-              <td className="p-3">{(r.price/1000000).toFixed(1)} tr</td>
-              <td className="p-3">{r.source}</td>
-              <td className="p-3">{r.status}</td>
-              <td className="p-3">
-                <div className="flex gap-2">
-                  <button onClick={()=>edit(r)} className="rounded border p-2"><Pencil size={16}/></button>
-                  {r.status!=="ACTIVE"&&<button onClick={()=>status(r.id,"active")} className="rounded border p-2 text-emerald-600"><Check size={16}/></button>}
-                  {r.status==="ACTIVE"&&<button onClick={()=>status(r.id,"hidden")} className="rounded border p-2"><EyeOff size={16}/></button>}
-                  <button onClick={()=>remove(r.id)} className="rounded border p-2 text-red-600"><Trash2 size={16}/></button>
-                </div>
-              </td>
-            </tr>)}
-          </tbody>
-        </table>
-      </div>
+      <div className="rounded-xl bg-white px-4 py-2 text-sm text-slate-600 shadow-sm">Tổng cộng <b className="text-slate-900">{total.toLocaleString("vi-VN")}</b> phòng</div>
     </div>
-  </main>
+
+    <form onSubmit={submitSearch} className="mb-4 flex flex-wrap gap-2 rounded-2xl bg-white p-3 shadow-sm">
+      <label className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-slate-200 px-3 focus-within:border-emerald-500">
+        <Search size={17} className="shrink-0 text-slate-400"/>
+        <input value={searchDraft} onChange={event => setSearchDraft(event.target.value)} className="w-full min-w-0 py-2.5 text-sm outline-none" placeholder="Tìm theo tiêu đề, địa chỉ, chủ tin, số điện thoại…" aria-label="Tìm phòng"/>
+      </label>
+      <button className="rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white hover:bg-emerald-700">Tìm kiếm</button>
+      {searchDraft && <button type="button" onClick={clearSearch} aria-label="Xóa tìm kiếm" className="rounded-xl border border-slate-200 px-3 text-slate-600 hover:bg-slate-50"><X size={17}/></button>}
+      <select aria-label="Lọc theo thời gian đăng" value={postedWithin} onChange={event => { setPostedWithin(event.target.value); setPage(1); }} className="rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700">
+        <option value="">Tất cả thời gian đăng</option><option value="1">Đăng trong 1 ngày</option><option value="3">Đăng trong 3 ngày</option><option value="5">Đăng trong 5 ngày</option><option value="7">Đăng trong 7 ngày</option>
+      </select>
+    </form>
+
+    <section className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+      <div className="flex min-w-0 items-start gap-3"><CalendarClock size={20} className="mt-0.5 shrink-0 text-amber-700"/><div><h2 className="text-sm font-black text-amber-950">Tự động xóa tin quá hạn</h2><p className="mt-1 max-w-2xl text-xs leading-5 text-amber-900">Tin đăng sẽ tự động bị xóa sau một khoảng thời gian nhất định nếu không còn hoạt động.</p></div></div>
+      <div className="flex flex-wrap items-center gap-2">
+        <select aria-label="Thời hạn xóa tin" value={retentionDays} disabled={savingRetention} onChange={event => { const nextDays = event.target.value; setRetentionDays(nextDays); void saveRetention(nextDays); }} className="rounded-xl border border-amber-300 bg-white px-3 py-2 text-sm text-slate-700 disabled:opacity-60">
+          <option value="">Tắt tự động xóa</option><option value="1">Xóa sau 1 ngày</option><option value="3">Xóa sau 3 ngày</option><option value="5">Xóa sau 5 ngày</option><option value="7">Xóa sau 7 ngày</option>
+        </select>
+        {savingRetention && <span role="status" className="text-xs text-amber-900">Saving...</span>}
+      </div>
+    </section>
+
+    {notice && <p role="status" className="mb-3 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}
+    {error && <div role="alert" className="mb-3 flex items-center justify-between gap-3 rounded-xl bg-red-50 p-3 text-sm text-red-700"><span>{error}</span><button onClick={() => void loadRooms()} className="shrink-0 font-bold underline">Thử lại</button></div>}
+
+    <div className="overflow-x-auto rounded-2xl bg-white shadow-sm">
+      <table className="w-full min-w-[850px] text-left text-sm">
+        <thead className="border-b bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr>
+          <th className="p-4">Thông tin phòng</th><th className="p-4">Giá / diện tích</th><th className="p-4">Ngày đăng</th><th className="p-4">Nguồn / trạng thái</th><th className="p-4">Thao tác</th>
+        </tr></thead>
+        <tbody>
+          {rooms.map(room => <tr key={room.id} className="border-b last:border-0 hover:bg-slate-50/70">
+            <td className="max-w-md p-4"><p className="line-clamp-2 font-bold text-slate-900">{room.title}</p><p className="mt-1 line-clamp-1 text-xs text-slate-500">{[room.address, room.street, room.ward, room.district].filter(Boolean).filter((part, index, all) => all.indexOf(part) === index).join(", ") || "Chưa có địa chỉ"}</p><p className="mt-1 text-[11px] text-slate-400">{room.seller_name || ""}{room.phone ? ` · ${room.phone}` : ""}</p></td>
+            <td className="whitespace-nowrap p-4"><b className="text-emerald-700">{(room.price / 1_000_000).toLocaleString("vi-VN", { maximumFractionDigits: 2 })} triệu</b><p className="mt-1 text-xs text-slate-500">{room.area ? `${room.area} m²` : "Chưa rõ diện tích"}</p></td>
+            <td className="whitespace-nowrap p-4 text-slate-600">{new Date(room.created_at).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric" })}</td>
+            <td className="p-4"><span className="block text-xs text-slate-500">{room.source}</span><span className={`mt-1 inline-block rounded-full px-2.5 py-1 text-xs font-bold ${room.status.toLowerCase() === "active" ? "bg-emerald-50 text-emerald-700" : room.status.toLowerCase() === "pending" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{roomStatusLabel(room.status)}</span></td>
+            <td className="p-4"><div className="flex items-center gap-1.5">
+              <button title="Sửa phòng" onClick={() => router.push(`/admin/rooms/add?edit=${room.id}`)} className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-100"><Pencil size={16}/></button>
+              {room.status.toLowerCase() === "active" ? <button title="Ẩn phòng" onClick={() => void changeStatus(room)} className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-100"><EyeOff size={16}/></button> : <button title="Hiển thị phòng" onClick={() => void changeStatus(room)} className="rounded-lg border border-emerald-200 p-2 text-emerald-700 hover:bg-emerald-50"><Check size={16}/></button>}
+              <button title="Xóa phòng" onClick={() => void removeRoom(room)} className="rounded-lg border border-red-100 p-2 text-red-600 hover:bg-red-50"><Trash2 size={16}/></button>
+            </div></td>
+          </tr>)}
+          {!loading && !rooms.length && <tr><td colSpan={5} className="p-12 text-center text-slate-500">{search ? "Không tìm thấy phòng phù hợp." : "Chưa có phòng nào."}</td></tr>}
+          {loading && <tr><td colSpan={5} className="p-12 text-center text-slate-500">Đang tải danh sách phòng…</td></tr>}
+        </tbody>
+      </table>
+    </div>
+
+    <footer className="mt-4 flex flex-wrap items-center justify-between gap-3">
+      <p className="text-sm text-slate-500">{total ? `Trang ${page} / ${totalPages} · ${rooms.length} phòng trên trang` : "Không có kết quả"}</p>
+      {totalPages > 1 && <nav aria-label="Phân trang danh sách phòng" className="flex flex-wrap items-center gap-1">
+        <button disabled={page <= 1} onClick={() => setPage(current => current - 1)} aria-label="Trang trước" className="rounded-lg border bg-white p-2 text-slate-700 disabled:opacity-40"><ChevronLeft size={17}/></button>
+        {pages.map((number, index) => <div key={number} className="flex items-center gap-1">
+          {index > 0 && number - pages[index - 1] > 1 && <span className="px-1 text-slate-400">…</span>}
+          <button aria-current={number === page ? "page" : undefined} onClick={() => setPage(number)} className={`min-w-9 rounded-lg border px-3 py-2 text-sm font-semibold ${number === page ? "border-slate-900 bg-slate-900 text-white" : "bg-white text-slate-700 hover:bg-slate-50"}`}>{number}</button>
+        </div>)}
+        <button disabled={page >= totalPages} onClick={() => setPage(current => current + 1)} aria-label="Trang sau" className="rounded-lg border bg-white p-2 text-slate-700 disabled:opacity-40"><ChevronRight size={17}/></button>
+      </nav>}
+    </footer>
+  </main>;
 }

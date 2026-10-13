@@ -11,6 +11,7 @@ from .models import User, UserRole
 
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+optional_oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 def hash_password(password: str) -> str:
     return pwd.hash(password)
@@ -26,7 +27,7 @@ def create_token(user: User) -> str:
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
-def current_user(token: str = Depends(oauth2), db: Session = Depends(get_db)) -> User:
+def user_from_token(token: str, db: Session) -> User:
     credentials = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Chưa đăng nhập")
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
@@ -40,6 +41,17 @@ def current_user(token: str = Depends(oauth2), db: Session = Depends(get_db)) ->
     if not user or not user.is_active:
         raise credentials
     return user
+
+def current_user(token: str = Depends(oauth2), db: Session = Depends(get_db)) -> User:
+    return user_from_token(token, db)
+
+def optional_current_user(token: str | None = Depends(optional_oauth2), db: Session = Depends(get_db)) -> User | None:
+    if not token:
+        return None
+    try:
+        return user_from_token(token, db)
+    except HTTPException:
+        return None
 
 def require_role(*roles: UserRole):
     def dependency(user: User = Depends(current_user)):

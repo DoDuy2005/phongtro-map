@@ -2,7 +2,7 @@
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Building2, Check, ImagePlus, List, LoaderCircle, LogOut, MapPin, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import { AlertCircle, Building2, Check, ImagePlus, List, LoaderCircle, LogOut, MapPin, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { API, api } from "@/lib/api";
 import { Room } from "@/types";
 
@@ -46,6 +46,9 @@ function imageSource(path?: string) {
 
 export default function LandlordPage() {
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [confirmationRooms, setConfirmationRooms] = useState<Room[]>([]);
+  const [confirmingRoomId, setConfirmingRoomId] = useState<string | null>(null);
+  const [confirmationError, setConfirmationError] = useState("");
   const [form, setForm] = useState(emptyForm);
   const [tab, setTab] = useState<Tab>("rooms");
   const [editing, setEditing] = useState<string | null>(null);
@@ -70,6 +73,12 @@ export default function LandlordPage() {
     try {
       const result = await api<{ items: Room[] }>("/landlord/rooms");
       setRooms(result.items);
+      try {
+        const confirmations = await api<{ items: Room[]; total: number }>("/landlord/rooms/confirmation-needed");
+        setConfirmationRooms(confirmations.items);
+      } catch {
+        setConfirmationRooms([]);
+      }
     } catch {
       router.push("/auth");
     } finally {
@@ -78,6 +87,24 @@ export default function LandlordPage() {
   }
 
   useEffect(() => { void load(); }, []);
+
+  async function answerAvailability(room: Room, available: boolean) {
+    setConfirmingRoomId(room.id);
+    setConfirmationError("");
+    try {
+      const updated = await api<Room>(`/landlord/rooms/${room.id}/confirm-availability`, {
+        method: "POST",
+        body: JSON.stringify({ available }),
+      });
+      setRooms(current => current.map(item => item.id === updated.id ? updated : item));
+      setConfirmationRooms(current => current.filter(item => item.id !== updated.id));
+      setNotice(available ? `Đã xác nhận “${room.title}” vẫn còn phòng; ngày đăng được làm mới.` : `Đã cập nhật “${room.title}” hết phòng.`);
+    } catch (err) {
+      setConfirmationError(err instanceof Error ? err.message : "Không cập nhật được trạng thái phòng.");
+    } finally {
+      setConfirmingRoomId(null);
+    }
+  }
 
   useEffect(() => {
     const urls = files.map(file => URL.createObjectURL(file));
@@ -309,12 +336,32 @@ export default function LandlordPage() {
     const matchesQuery = !query || `${room.title} ${room.street} ${room.address} ${room.district} ${room.ward}`.toLocaleLowerCase("vi-VN").includes(query);
     return matchesStatus && matchesQuery;
   }), [rooms, roomFilter, roomQuery]);
+  const roomNeedingConfirmation = confirmationRooms[0] || null;
 
   return (
     <main className="min-h-screen bg-slate-50">
+      {roomNeedingConfirmation && <div className="fixed inset-0 z-[2500] flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="room-confirmation-title">
+        <section className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+          <div className="flex items-start gap-3"><div className="rounded-xl bg-amber-50 p-2.5 text-amber-700"><AlertCircle size={22}/></div><div>
+            <p className="text-xs font-bold uppercase tracking-wide text-amber-700">Cần xác nhận phòng còn trống</p>
+            <h2 id="room-confirmation-title" className="mt-1 text-xl font-black text-slate-900">Phòng này còn cho thuê không?</h2>
+          </div></div>
+          <div className="mt-5 rounded-xl bg-slate-50 p-4">
+            <p className="font-bold text-slate-900">{roomNeedingConfirmation.title}</p>
+            <p className="mt-1 text-sm text-slate-600">{[roomNeedingConfirmation.street, roomNeedingConfirmation.address, roomNeedingConfirmation.district].filter(Boolean).join(", ")}</p>
+            <p className="mt-2 text-xs text-slate-500">Đăng ngày {new Date(roomNeedingConfirmation.created_at).toLocaleDateString("vi-VN")} · Còn {roomNeedingConfirmation.available_count}/{roomNeedingConfirmation.room_count} phòng · {confirmationRooms.length > 1 ? `${confirmationRooms.length} tin cần xác nhận` : ""}</p>
+          </div>
+          <p className="mt-4 text-sm leading-6 text-slate-600">Tin đã đăng quá thời hạn quản trị viên thiết lập. Xác nhận còn phòng sẽ làm mới ngày đăng; nếu đã cho thuê hết, tin sẽ được đánh dấu không còn phòng trống.</p>
+          {confirmationError && <p role="alert" className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-700">{confirmationError}</p>}
+          <div className="mt-5 grid gap-2 sm:grid-cols-2">
+            <button disabled={confirmingRoomId === roomNeedingConfirmation.id} onClick={() => void answerAvailability(roomNeedingConfirmation, true)} className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-60">{confirmingRoomId === roomNeedingConfirmation.id ? "Đang cập nhật…" : "Còn phòng"}</button>
+            <button disabled={confirmingRoomId === roomNeedingConfirmation.id} onClick={() => void answerAvailability(roomNeedingConfirmation, false)} className="rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-60">Đã cho thuê hết</button>
+          </div>
+        </section>
+      </div>}
       <header className="flex items-center justify-between border-b bg-white px-5 py-4">
         <h1 className="text-xl font-black text-slate-900"><Building2 className="mr-2 inline text-sky-600" size={22} />Khu vực chủ trọ</h1>
-        <button onClick={() => { localStorage.removeItem("token"); router.push("/"); }} className="text-sm font-semibold text-slate-600 hover:text-slate-950">
+        <button onClick={() => { if (!confirm("Bạn có chắc chắn muốn đăng xuất không?")) return; localStorage.removeItem("token"); router.replace("/"); }} className="text-sm font-semibold text-slate-600 hover:text-slate-950">
           <LogOut className="mr-1 inline" size={16} />Đăng xuất
         </button>
       </header>

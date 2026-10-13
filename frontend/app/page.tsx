@@ -1,6 +1,6 @@
 "use client";
 
-import { Building2, Map, ShieldCheck, UserRound } from "lucide-react";
+import { Building2, LogIn, Map, ShieldCheck, UserPlus, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 export default function Home() {
@@ -8,6 +8,14 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-gradient-to-br from-emerald-50 via-white to-sky-50">
       <div className="mx-auto flex min-h-screen max-w-6xl flex-col justify-center px-6 py-12">
+        <nav className="mb-8 flex justify-end gap-2" aria-label="Tài khoản">
+          <button onClick={() => router.push("/auth")} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm hover:bg-slate-50">
+            <LogIn size={16}/>Đăng nhập
+          </button>
+          <button onClick={() => router.push("/auth?mode=register")} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-emerald-700">
+            <UserPlus size={16}/>Đăng ký
+          </button>
+        </nav>
         <div className="mb-12 text-center">
           <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-600 text-white shadow-lg"><Map size={34}/></div>
           <h1 className="text-4xl font-black tracking-tight md:text-6xl">Phòng Trọ Map</h1>

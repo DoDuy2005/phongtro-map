@@ -5,7 +5,9 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-secret"
     cors_origins: str = "http://localhost:3000"
     crawler_enabled: bool = True
-    crawler_interval_minutes: int = 60
+    crawler_interval_minutes: int = 120
+    crawler_backfill_interval_hours: int = 6
+    crawler_refresh_interval_hours: int = 24
     frontend_url: str = "http://localhost:3000"
     brevo_api_key: str = ""
     smtp_host: str = ""

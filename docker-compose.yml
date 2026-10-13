@@ -22,7 +22,9 @@ services:
       JWT_SECRET: change-this-secret-in-production
       CORS_ORIGINS: http://localhost:3000
       CRAWLER_ENABLED: "true"
-      CRAWLER_INTERVAL_MINUTES: "60"
+      CRAWLER_INTERVAL_MINUTES: "120"
+      CRAWLER_BACKFILL_INTERVAL_HOURS: "6"
+      CRAWLER_REFRESH_INTERVAL_HOURS: "24"
       FRONTEND_URL: http://localhost:3000
       BREVO_API_KEY: ${BREVO_API_KEY:-}
       SMTP_HOST: ${SMTP_HOST:-}

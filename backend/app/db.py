@@ -85,3 +85,46 @@ def ensure_room_street_length():
     if street is not None and getattr(street["type"], "length", None) != 500:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE rooms ALTER COLUMN street TYPE VARCHAR(500)"))
+
+def ensure_favorite_snapshots():
+    inspector = inspect(engine)
+    if "favorites" not in inspector.get_table_names() or "rooms" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("favorites")}
+    with engine.begin() as connection:
+        if "room_snapshot_id" not in columns:
+            connection.execute(text("ALTER TABLE favorites ADD COLUMN room_snapshot_id UUID"))
+        if "snapshot" not in columns:
+            connection.execute(text("ALTER TABLE favorites ADD COLUMN snapshot JSON"))
+        connection.execute(text(
+            "UPDATE favorites SET room_snapshot_id = room_id WHERE room_snapshot_id IS NULL"
+        ))
+        connection.execute(text("""
+            UPDATE favorites AS f SET snapshot = json_build_object(
+                'title', r.title,
+                'source', r.source,
+                'source_url', CASE WHEN r.source = 'nhatot' THEN r.source_url ELSE NULL END,
+                'price', r.price,
+                'area', r.area,
+                'region', r.region,
+                'district', r.district,
+                'ward', r.ward,
+                'street', r.street,
+                'address', r.address,
+                'images', r.images,
+                'room_count', r.room_count
+            ) FROM rooms AS r WHERE f.room_id = r.id AND f.snapshot IS NULL
+        """))
+        for foreign_key in inspector.get_foreign_keys("favorites"):
+            if foreign_key.get("constrained_columns") == ["room_id"] and foreign_key.get("name"):
+                name = engine.dialect.identifier_preparer.quote(foreign_key["name"])
+                connection.execute(text(f"ALTER TABLE favorites DROP CONSTRAINT {name}"))
+        connection.execute(text("ALTER TABLE favorites ALTER COLUMN room_id DROP NOT NULL"))
+        connection.execute(text(
+            "ALTER TABLE favorites ADD CONSTRAINT fk_favorites_room_set_null "
+            "FOREIGN KEY (room_id) REFERENCES rooms (id) ON DELETE SET NULL"
+        ))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_favorite_snapshot "
+            "ON favorites (user_id, room_snapshot_id)"
+        ))

@@ -51,7 +51,7 @@ class Room(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     landlord = relationship("User", back_populates="rooms")
-    favorites = relationship("Favorite", back_populates="room", cascade="all, delete-orphan")
+    favorites = relationship("Favorite", back_populates="room", passive_deletes=True)
     uploaded_images = relationship("RoomImage", back_populates="room", cascade="all, delete-orphan")
 
     __table_args__ = (
@@ -95,7 +95,9 @@ class Favorite(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    room_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"))
+    room_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("rooms.id", ondelete="SET NULL"), nullable=True)
+    room_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True, index=True)
+    snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="favorites")
@@ -103,4 +105,34 @@ class Favorite(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "room_id", name="uq_favorite"),
+        UniqueConstraint("user_id", "room_snapshot_id", name="uq_favorite_snapshot"),
     )
+
+class RoomRetentionSetting(Base):
+    __tablename__ = "room_retention_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    days: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class RoomExpiryReminder(Base):
+    __tablename__ = "room_expiry_reminders"
+
+    room_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"), primary_key=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class CrawlerCursor(Base):
+    __tablename__ = "crawler_cursors"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    offset: Mapped[int] = mapped_column(Integer, default=0)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class CrawlerGeocodeCache(Base):
+    __tablename__ = "crawler_geocode_cache"
+
+    address_key: Mapped[str] = mapped_column(String(600), primary_key=True)
+    lat: Mapped[float] = mapped_column(Float)
+    lon: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

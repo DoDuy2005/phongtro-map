@@ -67,7 +67,16 @@ class RoomOut(RoomBase):
     updated_at: datetime
     is_favorite: bool = False
     uploaded_images: list[str] = Field(default_factory=list)
+    favorite_id: UUID | None = None
+    is_removed: bool = False
+    is_unavailable: bool = False
 
 class RoomList(BaseModel):
     items: list[RoomOut]
     total: int
+
+class RoomRetentionUpdate(BaseModel):
+    days: int | None = Field(default=None, ge=1, le=7)
+
+class RoomAvailabilityConfirmation(BaseModel):
+    available: bool

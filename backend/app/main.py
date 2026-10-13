@@ -1,22 +1,24 @@
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from threading import Lock
+from typing import Literal
 from uuid import UUID
 import secrets
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, Depends, HTTPException, Query, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, or_
+from sqlalchemy import Text, cast, func, or_
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .db import Base, engine, get_db, SessionLocal, ensure_email_verification_columns, ensure_room_count_column, ensure_available_count_column, ensure_room_street_length
-from .models import User, UserRole, Room, RoomStatus, RoomImage, Favorite
-from .schemas import Token, RegisterIn, LoginIn, UserOut, RoomCreate, RoomOut, RoomList, RegisterResult
-from .auth import hash_password, verify_password, create_token, current_user, require_role
+from .db import Base, engine, get_db, SessionLocal, ensure_email_verification_columns, ensure_room_count_column, ensure_available_count_column, ensure_room_street_length, ensure_favorite_snapshots
+from .models import User, UserRole, Room, RoomStatus, RoomImage, Favorite, RoomRetentionSetting, RoomExpiryReminder, CrawlerCursor
+from .schemas import Token, RegisterIn, LoginIn, UserOut, RoomCreate, RoomOut, RoomList, RegisterResult, RoomRetentionUpdate, RoomAvailabilityConfirmation
+from .auth import hash_password, verify_password, create_token, current_user, optional_current_user, require_role
 from .crawler_service import crawl_once
-from .email_service import send_verification_email
+from .email_service import send_verification_email, send_room_availability_email
 
 scheduler = BackgroundScheduler()
 crawler_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="crawler")
@@ -30,9 +32,11 @@ def update_crawler_state(**changes):
         crawler_state = {**crawler_state, **changes}
 
 def run_crawler_task():
+    crawler_lock.acquire()
+    update_crawler_state(status="running", progress=0, processed=0, target=10, stage="Đang kết nối Nhà Tốt", result=None, error=None)
     db = SessionLocal()
     try:
-        result = crawl_once(db, max_records=3, progress_callback=update_crawler_state, geocode_missing=False, only_new=True)
+        result = crawl_once(db, max_records=10, progress_callback=update_crawler_state, geocode_missing=False, only_new=True)
         update_crawler_state(status="completed", progress=100, stage="Hoàn tất", result=result, error=None)
     except Exception as exc:
         db.rollback()
@@ -42,12 +46,111 @@ def run_crawler_task():
         db.close()
         crawler_lock.release()
 
-def scheduled_crawl():
+def scheduled_crawl_job(job_name, max_records, only_new, geocode_missing=True, cursor_key=None, repeat_cursor=False):
+    if not crawler_lock.acquire(blocking=False):
+        print(f"Crawler {job_name} skipped: another crawl is running")
+        return
     db = SessionLocal()
     try:
-        crawl_once(db, max_records=200)
+        start_offset = 0
+        cursor = None
+        if cursor_key:
+            cursor = db.get(CrawlerCursor, cursor_key)
+            if cursor is None:
+                cursor = CrawlerCursor(key=cursor_key, offset=0, completed=False)
+                db.add(cursor)
+                db.commit()
+            if cursor.completed:
+                if not repeat_cursor:
+                    return
+                cursor.offset = 0
+                cursor.completed = False
+                db.commit()
+            start_offset = cursor.offset
+        result = crawl_once(
+            db,
+            max_records=max_records,
+            only_new=only_new,
+            geocode_missing=geocode_missing,
+            start_offset=start_offset,
+        )
+        if cursor is not None:
+            cursor.offset = result["next_offset"]
+            cursor.completed = result["backfill_complete"] and not repeat_cursor
+            db.commit()
+        print(f"Crawler {job_name} completed: {result}")
     except Exception as exc:
+        db.rollback()
         print("Crawler error:", exc)
+    finally:
+        db.close()
+        crawler_lock.release()
+
+def scheduled_incremental_crawl():
+    scheduled_crawl_job("incremental", max_records=100, only_new=True)
+
+def scheduled_daily_refresh():
+    scheduled_crawl_job(
+        "daily refresh",
+        max_records=100,
+        only_new=False,
+        cursor_key="nhatot_daily_refresh",
+        repeat_cursor=True,
+    )
+
+def scheduled_backfill():
+    scheduled_crawl_job("backfill", max_records=200, only_new=True, cursor_key="nhatot_hanoi")
+
+def delete_expired_rooms(db: Session, days: int) -> int:
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    expired = db.query(Room).filter(Room.source == "nhatot", Room.created_at < cutoff).all()
+    if not expired:
+        return 0
+    for room in expired:
+        preserve_room_favorites(db, room)
+    room_ids = [room.id for room in expired]
+    return db.query(Room).filter(Room.id.in_(room_ids)).delete(synchronize_session=False)
+
+def send_expired_room_reminders(db: Session, days: int) -> None:
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    expired_rooms = db.query(Room).filter(
+        Room.source == "manual",
+        Room.landlord_id.isnot(None),
+        Room.status == RoomStatus.ACTIVE,
+        Room.available_count > 0,
+        Room.created_at < cutoff,
+    ).all()
+    for room in expired_rooms:
+        reminder = db.get(RoomExpiryReminder, room.id)
+        if reminder and reminder.sent_at >= room.created_at:
+            continue
+        landlord = db.get(User, room.landlord_id)
+        if not landlord or not landlord.email:
+            continue
+        try:
+            send_room_availability_email(landlord.email, landlord.full_name, room.title, days)
+            if reminder:
+                reminder.sent_at = datetime.utcnow()
+            else:
+                db.add(RoomExpiryReminder(room_id=room.id, sent_at=datetime.utcnow()))
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            print(f"Room expiry reminder failed for {room.id}: {exc}")
+
+def scheduled_room_cleanup():
+    db = SessionLocal()
+    try:
+        setting = db.get(RoomRetentionSetting, 1)
+        if setting and setting.days:
+            deleted = delete_expired_rooms(db, setting.days)
+            if deleted:
+                db.commit()
+                print(f"Room retention cleanup removed {deleted} expired rooms")
+            send_expired_room_reminders(db, setting.days)
+    except Exception as exc:
+        db.rollback()
+        print("Room retention cleanup error:", exc)
     finally:
         db.close()
 
@@ -58,9 +161,13 @@ async def lifespan(app: FastAPI):
     ensure_room_count_column()
     ensure_available_count_column()
     ensure_room_street_length()
+    ensure_favorite_snapshots()
+    scheduler.add_job(scheduled_room_cleanup, "interval", hours=1, id="room-retention", replace_existing=True, next_run_time=datetime.utcnow())
     if settings.crawler_enabled:
-        scheduler.add_job(scheduled_crawl, "interval", minutes=settings.crawler_interval_minutes, id="nhatot-sync", replace_existing=True)
-        scheduler.start()
+        scheduler.add_job(scheduled_incremental_crawl, "interval", minutes=settings.crawler_interval_minutes, id="nhatot-incremental", replace_existing=True)
+        scheduler.add_job(scheduled_daily_refresh, "interval", hours=settings.crawler_refresh_interval_hours, id="nhatot-daily-refresh", replace_existing=True)
+        scheduler.add_job(scheduled_backfill, "interval", hours=settings.crawler_backfill_interval_hours, id="nhatot-backfill", replace_existing=True)
+    scheduler.start()
     yield
     if scheduler.running:
         scheduler.shutdown(wait=False)
@@ -147,12 +254,99 @@ def room_to_out(room: Room, favorite_ids: set[UUID] | None = None):
     room_fields = {
         name: getattr(room, name)
         for name in RoomOut.model_fields
-        if name not in {"uploaded_images", "is_favorite"}
+        if name not in {"uploaded_images", "is_favorite", "favorite_id", "is_removed", "is_unavailable"}
     }
     data = RoomOut.model_validate(room_fields).model_dump()
     data["is_favorite"] = bool(favorite_ids and room.id in favorite_ids)
     data["uploaded_images"] = [f"/rooms/{room.id}/images/{image.id}" for image in room.uploaded_images]
     return data
+
+def room_snapshot(room: Room) -> dict:
+    return {
+        "title": room.title,
+        "source": room.source,
+        "source_url": room.source_url if room.source == "nhatot" else None,
+        "price": room.price,
+        "area": room.area,
+        "region": room.region,
+        "district": room.district,
+        "ward": room.ward,
+        "street": room.street,
+        "address": room.address,
+        "images": list(room.images or []),
+        "room_count": room.room_count,
+    }
+
+def preserve_room_favorites(db: Session, room: Room) -> None:
+    favorites = db.query(Favorite).filter(Favorite.room_id == room.id).all()
+    snapshot = room_snapshot(room)
+    for favorite in favorites:
+        favorite.room_snapshot_id = room.id
+        favorite.snapshot = snapshot
+
+def favorite_to_out(favorite: Favorite) -> dict:
+    snapshot = favorite.snapshot or {}
+    room = favorite.room
+    if room:
+        data = room_to_out(room, {room.id})
+        data["favorite_id"] = favorite.id
+        data["is_removed"] = False
+        is_unavailable = room.source == "manual" and (
+            room.available_count <= 0 or not room.available or room.status != RoomStatus.ACTIVE
+        )
+        data["is_unavailable"] = is_unavailable
+        if is_unavailable:
+            snapshot = room_snapshot(room)
+            for field in ("title", "price", "area", "region", "district", "ward", "street", "address", "images", "room_count"):
+                data[field] = snapshot[field]
+            data.update({
+                "description": "",
+                "available": False,
+                "available_count": 0,
+                "phone": "",
+                "seller_name": "",
+                "amenities": [],
+                "source_url": None,
+                "uploaded_images": [],
+            })
+        return data
+
+    source = snapshot.get("source") or "manual"
+    snapshot_id = favorite.room_snapshot_id or favorite.id
+    return {
+        **snapshot,
+        "id": snapshot_id,
+        "source": source,
+        "source_id": None,
+        "landlord_id": None,
+        "title": snapshot.get("title") or "Tin đã gỡ",
+        "description": "",
+        "price": snapshot.get("price") or 0,
+        "room_count": snapshot.get("room_count") or 1,
+        "available_count": 0,
+        "area": snapshot.get("area"),
+        "region": snapshot.get("region") or "",
+        "district": snapshot.get("district") or "",
+        "ward": snapshot.get("ward") or "",
+        "street": snapshot.get("street") or "",
+        "address": snapshot.get("address") or "",
+        "lat": None,
+        "lon": None,
+        "images": snapshot.get("images") or [],
+        "amenities": [],
+        "phone": "",
+        "seller_name": "",
+        "status": RoomStatus.HIDDEN.value,
+        "available": False,
+        "created_at": favorite.created_at,
+        "updated_at": favorite.created_at,
+        "is_favorite": True,
+        "uploaded_images": [],
+        "favorite_id": favorite.id,
+        "is_removed": True,
+        "is_unavailable": False,
+        "source_url": snapshot.get("source_url") if source == "nhatot" else None,
+    }
 
 @app.get("/api/geocode/search")
 def search_address(q: str = Query(..., min_length=3, max_length=200)):
@@ -202,6 +396,7 @@ def room_image(room_id: UUID, image_id: UUID, db: Session = Depends(get_db)):
 @app.get("/api/rooms", response_model=RoomList)
 def list_rooms(
     db: Session = Depends(get_db),
+    user: User | None = Depends(optional_current_user),
     q: str = "",
     district: str = "",
     min_price: float | None = None,
@@ -215,12 +410,13 @@ def list_rooms(
     max_lon: float | None = None,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    sort_by: Literal["recent", "price-asc", "price-desc", "area-desc"] = "recent",
 ):
     query = db.query(Room).filter(Room.status == RoomStatus.ACTIVE)
     query = query.filter(Room.available_count > 0 if available else Room.available_count == 0)
     if q:
         like = f"%{q}%"
-        query = query.filter(or_(Room.title.ilike(like), Room.address.ilike(like), Room.description.ilike(like)))
+        query = query.filter(or_(Room.title.ilike(like), Room.address.ilike(like), Room.description.ilike(like), cast(Room.amenities, Text).ilike(like)))
     if district:
         query = query.filter(Room.district.ilike(f"%{district}%"))
     if min_price is not None: query = query.filter(Room.price >= min_price)
@@ -233,10 +429,27 @@ def list_rooms(
     if max_lon is not None: query = query.filter(Room.lon <= max_lon)
 
     total = query.count()
-    rooms = query.order_by(Room.updated_at.desc()).offset(offset).limit(limit).all()
+    if sort_by == "price-asc":
+        ordering = (Room.price.asc(), Room.updated_at.desc())
+    elif sort_by == "price-desc":
+        ordering = (Room.price.desc(), Room.updated_at.desc())
+    elif sort_by == "area-desc":
+        ordering = (Room.area.desc().nullslast(), Room.updated_at.desc())
+    else:
+        ordering = (Room.updated_at.desc(),)
+    rooms = query.order_by(*ordering).offset(offset).limit(limit).all()
+
+    favorite_ids = None
+    if user and user.role == UserRole.USER:
+        favorite_ids = {
+            room_id for (room_id,) in db.query(Favorite.room_id).filter(
+                Favorite.user_id == user.id,
+                Favorite.room_id.isnot(None),
+            ).all()
+        }
 
     return {
-        "items": [room_to_out(r) for r in rooms],
+        "items": [room_to_out(r, favorite_ids) for r in rooms],
         "total": total,
     }
 
@@ -257,14 +470,28 @@ def toggle_favorite(room_id: UUID, db: Session = Depends(get_db), user: User = D
         db.delete(fav)
         db.commit()
         return {"saved": False}
-    db.add(Favorite(user_id=user.id, room_id=room.id))
+    db.add(Favorite(
+        user_id=user.id,
+        room_id=room.id,
+        room_snapshot_id=room.id,
+        snapshot=room_snapshot(room),
+    ))
     db.commit()
     return {"saved": True}
 
 @app.get("/api/me/favorites", response_model=RoomList)
 def favorites(db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.USER))):
-    rooms = db.query(Room).join(Favorite, Favorite.room_id == Room.id).filter(Favorite.user_id == user.id).order_by(Favorite.created_at.desc()).all()
-    return {"items": [room_to_out(r, {r.id}) for r in rooms], "total": len(rooms)}
+    saved = db.query(Favorite).filter(Favorite.user_id == user.id).order_by(Favorite.created_at.desc()).all()
+    return {"items": [favorite_to_out(favorite) for favorite in saved], "total": len(saved)}
+
+@app.delete("/api/me/favorites/{favorite_id}")
+def remove_saved_favorite(favorite_id: UUID, db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.USER))):
+    favorite = db.query(Favorite).filter(Favorite.id == favorite_id, Favorite.user_id == user.id).first()
+    if not favorite:
+        raise HTTPException(404, "Saved room not found")
+    db.delete(favorite)
+    db.commit()
+    return {"deleted": True}
 
 def set_location(room: Room):
     from geoalchemy2.elements import WKTElement
@@ -275,6 +502,40 @@ def set_location(room: Room):
 def landlord_rooms(db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.LANDLORD))):
     rooms = db.query(Room).filter(Room.landlord_id == user.id).order_by(Room.updated_at.desc()).all()
     return {"items": [room_to_out(r) for r in rooms], "total": len(rooms)}
+
+@app.get("/api/landlord/rooms/confirmation-needed", response_model=RoomList)
+def landlord_rooms_needing_confirmation(db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.LANDLORD))):
+    setting = db.get(RoomRetentionSetting, 1)
+    if not setting or not setting.days:
+        return {"items": [], "total": 0}
+    cutoff = datetime.utcnow() - timedelta(days=setting.days)
+    rooms = db.query(Room).filter(
+        Room.landlord_id == user.id,
+        Room.source == "manual",
+        Room.status == RoomStatus.ACTIVE,
+        Room.available_count > 0,
+        Room.created_at < cutoff,
+    ).order_by(Room.created_at.asc()).all()
+    return {"items": [room_to_out(room) for room in rooms], "total": len(rooms)}
+
+@app.post("/api/landlord/rooms/{room_id}/confirm-availability", response_model=RoomOut)
+def landlord_confirm_room_availability(
+    room_id: UUID,
+    payload: RoomAvailabilityConfirmation,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.LANDLORD)),
+):
+    room = db.get(Room, room_id)
+    if not room or room.landlord_id != user.id or room.source != "manual":
+        raise HTTPException(404, "Room not found")
+    if payload.available:
+        room.created_at = datetime.utcnow()
+    else:
+        room.available_count = 0
+        room.available = False
+    db.commit()
+    db.refresh(room)
+    return room_to_out(room)
 
 @app.post("/api/landlord/rooms", response_model=RoomOut)
 def landlord_create_room(payload: RoomCreate, db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.LANDLORD))):
@@ -344,6 +605,7 @@ def landlord_delete_room(room_id: UUID, db: Session = Depends(get_db), user: Use
     room = db.get(Room, room_id)
     if not room or room.landlord_id != user.id:
         raise HTTPException(404, "Không tìm thấy phòng")
+    preserve_room_favorites(db, room)
     db.delete(room)
     db.commit()
     return {"deleted": True}
@@ -351,23 +613,28 @@ def landlord_delete_room(room_id: UUID, db: Session = Depends(get_db), user: Use
 @app.post("/api/admin/crawler/run")
 def run_crawler(user: User = Depends(require_role(UserRole.ADMIN))):
     global crawler_state
-    if not crawler_lock.acquire(blocking=False):
-        with crawler_state_lock:
-            return {**crawler_state, "message": "Crawler đang chạy."}
-    update_crawler_state(status="running", progress=0, processed=0, target=3, stage="Đang kết nối Nhà Tốt", result=None, error=None)
+    with crawler_state_lock:
+        if crawler_state.get("status") in ("queued", "running"):
+            return dict(crawler_state)
+        crawler_state = {
+            "status": "queued",
+            "progress": 0,
+            "processed": 0,
+            "target": 10,
+            "stage": "Đang chờ crawler tự động hoàn tất",
+            "result": None,
+            "error": None,
+        }
     try:
         future = crawler_executor.submit(run_crawler_task)
         def release_if_not_started(done_future):
             if done_future.cancelled() or done_future.exception() is not None:
                 update_crawler_state(status="failed", error="Không thể thực thi tác vụ crawler.")
-                if crawler_lock.locked():
-                    crawler_lock.release()
         future.add_done_callback(release_if_not_started)
     except Exception as exc:
         update_crawler_state(status="failed", error=str(exc))
-        crawler_lock.release()
         raise HTTPException(500, f"Không khởi động được crawler: {exc}")
-    return {"status": "started", "progress": 0, "processed": 0, "target": 3}
+    return {"status": "queued", "progress": 0, "processed": 0, "target": 10}
 
 @app.get("/api/admin/crawler/status")
 def get_crawler_status(user: User = Depends(require_role(UserRole.ADMIN))):
@@ -385,10 +652,103 @@ def admin_stats(db: Session = Depends(get_db), user: User = Depends(require_role
         "nhatot_rooms": db.query(Room).filter(Room.source == "nhatot").count(),
     }
 
+@app.get("/api/admin/accounts")
+def admin_accounts(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.ADMIN)),
+    role: Literal["user", "landlord"] = "user",
+    q: str = "",
+    active: bool | None = None,
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    account_role = UserRole(role)
+    query = db.query(User).filter(User.role == account_role)
+    if q.strip():
+        like = f"%{q.strip()}%"
+        query = query.filter(or_(User.email.ilike(like), User.full_name.ilike(like), User.phone.ilike(like)))
+    if active is not None:
+        query = query.filter(User.is_active == active)
+
+    total = query.count()
+    accounts = query.order_by(User.created_at.desc()).offset(offset).limit(limit).all()
+    return {
+        "items": [{
+            "id": account.id,
+            "email": account.email,
+            "full_name": account.full_name,
+            "phone": account.phone,
+            "role": account.role.value,
+            "is_active": account.is_active,
+            "is_email_verified": account.is_email_verified,
+            "created_at": account.created_at,
+        } for account in accounts],
+        "total": total,
+    }
+
+@app.put("/api/admin/accounts/{account_id}/active")
+def admin_set_account_active(
+    account_id: UUID,
+    active: bool,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.ADMIN)),
+):
+    account = db.get(User, account_id)
+    if not account or account.role not in (UserRole.USER, UserRole.LANDLORD):
+        raise HTTPException(404, "Account not found")
+    account.is_active = active
+    db.commit()
+    return {"id": account.id, "is_active": account.is_active}
+
+@app.get("/api/admin/room-retention")
+def get_room_retention(db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.ADMIN))):
+    setting = db.get(RoomRetentionSetting, 1)
+    return {"days": setting.days if setting else None}
+
+@app.put("/api/admin/room-retention")
+def set_room_retention(payload: RoomRetentionUpdate, db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.ADMIN))):
+    if payload.days not in (None, 1, 3, 5, 7):
+        raise HTTPException(422, "Retention must be 1, 3, 5, or 7 days")
+    setting = db.get(RoomRetentionSetting, 1)
+    if setting is None:
+        setting = RoomRetentionSetting(id=1, days=payload.days)
+        db.add(setting)
+    else:
+        setting.days = payload.days
+    deleted = delete_expired_rooms(db, payload.days) if payload.days else 0
+    db.commit()
+    if payload.days:
+        scheduler.add_job(scheduled_room_cleanup, "date", run_date=datetime.utcnow(), id="room-retention-immediate", replace_existing=True)
+    return {"days": payload.days, "deleted": deleted}
+
 @app.get("/api/admin/rooms", response_model=RoomList)
-def admin_rooms(db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.ADMIN))):
-    rooms = db.query(Room).order_by(Room.updated_at.desc()).limit(500).all()
-    return {"items": [room_to_out(r) for r in rooms], "total": len(rooms)}
+def admin_rooms(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.ADMIN)),
+    q: str = "",
+    posted_within_days: Literal[1, 3, 5, 7] | None = None,
+    limit: int = Query(100, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    query = db.query(Room)
+    if q.strip():
+        like = f"%{q.strip()}%"
+        query = query.filter(or_(
+            Room.title.ilike(like),
+            Room.description.ilike(like),
+            Room.address.ilike(like),
+            Room.street.ilike(like),
+            Room.district.ilike(like),
+            Room.ward.ilike(like),
+            Room.seller_name.ilike(like),
+            Room.phone.ilike(like),
+        ))
+    if posted_within_days is not None:
+        cutoff = datetime.utcnow() - timedelta(days=posted_within_days)
+        query = query.filter(Room.created_at >= cutoff)
+    total = query.count()
+    rooms = query.order_by(Room.updated_at.desc()).offset(offset).limit(limit).all()
+    return {"items": [room_to_out(r) for r in rooms], "total": total}
 
 
 @app.post("/api/admin/rooms", response_model=RoomOut)
@@ -401,6 +761,37 @@ def admin_create_room(payload: RoomCreate, db: Session = Depends(get_db), user: 
     room = Room(**data, source="manual")
     set_location(room)
     db.add(room)
+    db.commit()
+    db.refresh(room)
+    return room_to_out(room)
+
+@app.post("/api/admin/rooms/{room_id}/images", response_model=RoomOut)
+async def admin_upload_room_images(
+    room_id: UUID,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(UserRole.ADMIN)),
+):
+    room = db.get(Room, room_id)
+    if not room:
+        raise HTTPException(404, "Room not found")
+    if not files or len(files) > 8:
+        raise HTTPException(400, "Upload between 1 and 8 images")
+    allowed_types = {"image/jpeg", "image/png", "image/webp"}
+    for upload in files:
+        if upload.content_type not in allowed_types:
+            raise HTTPException(400, "Only JPG, PNG, and WebP images are accepted")
+        content = await upload.read(5 * 1024 * 1024 + 1)
+        if not content or len(content) > 5 * 1024 * 1024:
+            raise HTTPException(400, "Each image must be smaller than 5 MB")
+        valid_signature = (
+            upload.content_type == "image/jpeg" and content.startswith(b"\xff\xd8\xff")
+            or upload.content_type == "image/png" and content.startswith(b"\x89PNG\r\n\x1a\n")
+            or upload.content_type == "image/webp" and content.startswith(b"RIFF") and content[8:12] == b"WEBP"
+        )
+        if not valid_signature:
+            raise HTTPException(400, "Image content does not match its file type")
+        db.add(RoomImage(room_id=room.id, content_type=upload.content_type, data=content))
     db.commit()
     db.refresh(room)
     return room_to_out(room)
@@ -428,6 +819,7 @@ def admin_delete_room(room_id: UUID, db: Session = Depends(get_db), user: User =
     room = db.get(Room, room_id)
     if not room:
         raise HTTPException(404, "Không tìm thấy phòng")
+    preserve_room_favorites(db, room)
     db.delete(room)
     db.commit()
     return {"deleted": True}
