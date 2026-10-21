@@ -24,7 +24,7 @@ scheduler = BackgroundScheduler()
 crawler_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="crawler")
 crawler_lock = Lock()
 crawler_state_lock = Lock()
-crawler_state = {"status": "idle", "result": None, "error": None}
+crawler_state = {"status": "idle", "source": None, "job": None, "progress": 0, "processed": 0, "target": 0, "result": None, "error": None}
 
 def update_crawler_state(**changes):
     global crawler_state
@@ -33,11 +33,11 @@ def update_crawler_state(**changes):
 
 def run_crawler_task():
     crawler_lock.acquire()
-    update_crawler_state(status="running", progress=0, processed=0, target=10, stage="Đang kết nối Nhà Tốt", result=None, error=None)
+    update_crawler_state(status="running", source="manual", job="demo", progress=0, processed=0, target=10, stage="Đang kết nối Nhà Tốt", result=None, error=None, started_at=datetime.utcnow().isoformat() + "Z")
     db = SessionLocal()
     try:
         result = crawl_once(db, max_records=10, progress_callback=update_crawler_state, geocode_missing=False, only_new=True)
-        update_crawler_state(status="completed", progress=100, stage="Hoàn tất", result=result, error=None)
+        update_crawler_state(status="completed", progress=100, stage="Hoàn tất", result=result, error=None, finished_at=datetime.utcnow().isoformat() + "Z")
     except Exception as exc:
         db.rollback()
         update_crawler_state(status="failed", result=None, error=str(exc))
@@ -50,6 +50,8 @@ def scheduled_crawl_job(job_name, max_records, only_new, geocode_missing=True, c
     if not crawler_lock.acquire(blocking=False):
         print(f"Crawler {job_name} skipped: another crawl is running")
         return
+    update_crawler_state(status="running", source="automatic", job=job_name, progress=0, processed=0, target=max_records, stage="Đang bắt đầu lượt cào tự động", result=None, error=None, started_at=datetime.utcnow().isoformat() + "Z")
+    print(f"Crawler {job_name} started (automatic, target={max_records})")
     db = SessionLocal()
     try:
         start_offset = 0
@@ -62,6 +64,8 @@ def scheduled_crawl_job(job_name, max_records, only_new, geocode_missing=True, c
                 db.commit()
             if cursor.completed:
                 if not repeat_cursor:
+                    update_crawler_state(status="completed", progress=100, stage="Đã hoàn tất backfill trước đó", result={"fetched": 0, "created": 0, "updated": 0}, finished_at=datetime.utcnow().isoformat() + "Z")
+                    print(f"Crawler {job_name} skipped: backfill already complete")
                     return
                 cursor.offset = 0
                 cursor.completed = False
@@ -73,14 +77,17 @@ def scheduled_crawl_job(job_name, max_records, only_new, geocode_missing=True, c
             only_new=only_new,
             geocode_missing=geocode_missing,
             start_offset=start_offset,
+            progress_callback=update_crawler_state,
         )
         if cursor is not None:
             cursor.offset = result["next_offset"]
             cursor.completed = result["backfill_complete"] and not repeat_cursor
             db.commit()
+        update_crawler_state(status="completed", source="automatic", job=job_name, progress=100, stage="Hoàn tất lượt cào tự động", result=result, error=None, finished_at=datetime.utcnow().isoformat() + "Z")
         print(f"Crawler {job_name} completed: {result}")
     except Exception as exc:
         db.rollback()
+        update_crawler_state(status="failed", source="automatic", job=job_name, stage="Lượt cào tự động thất bại", error=str(exc), finished_at=datetime.utcnow().isoformat() + "Z")
         print("Crawler error:", exc)
     finally:
         db.close()
@@ -164,7 +171,7 @@ async def lifespan(app: FastAPI):
     ensure_favorite_snapshots()
     scheduler.add_job(scheduled_room_cleanup, "interval", hours=1, id="room-retention", replace_existing=True, next_run_time=datetime.utcnow())
     if settings.crawler_enabled:
-        scheduler.add_job(scheduled_incremental_crawl, "interval", minutes=settings.crawler_interval_minutes, id="nhatot-incremental", replace_existing=True)
+        scheduler.add_job(scheduled_incremental_crawl, "interval", minutes=settings.crawler_interval_minutes, id="nhatot-incremental", replace_existing=True, next_run_time=datetime.utcnow())
         scheduler.add_job(scheduled_daily_refresh, "interval", hours=settings.crawler_refresh_interval_hours, id="nhatot-daily-refresh", replace_existing=True)
         scheduler.add_job(scheduled_backfill, "interval", hours=settings.crawler_backfill_interval_hours, id="nhatot-backfill", replace_existing=True)
     scheduler.start()
@@ -618,6 +625,8 @@ def run_crawler(user: User = Depends(require_role(UserRole.ADMIN))):
             return dict(crawler_state)
         crawler_state = {
             "status": "queued",
+            "source": "manual",
+            "job": "demo",
             "progress": 0,
             "processed": 0,
             "target": 10,
@@ -639,7 +648,13 @@ def run_crawler(user: User = Depends(require_role(UserRole.ADMIN))):
 @app.get("/api/admin/crawler/status")
 def get_crawler_status(user: User = Depends(require_role(UserRole.ADMIN))):
     with crawler_state_lock:
-        return dict(crawler_state)
+        return {
+            **crawler_state,
+            "enabled": settings.crawler_enabled,
+            "interval_minutes": settings.crawler_interval_minutes,
+            "backfill_interval_hours": settings.crawler_backfill_interval_hours,
+            "refresh_interval_hours": settings.crawler_refresh_interval_hours,
+        }
 
 @app.get("/api/admin/stats")
 def admin_stats(db: Session = Depends(get_db), user: User = Depends(require_role(UserRole.ADMIN))):

@@ -108,25 +108,34 @@ export default function AdminAddRoomPage() {
   }, []);
 
   useEffect(() => {
-    if (!crawlerRunning) return;
-    const timer = window.setInterval(async () => {
+    let active = true;
+    const refreshCrawlerStatus = async () => {
       try {
         const state = await api<any>("/admin/crawler/status");
+        if (!active) return;
         setCrawlerProgress(state);
-        if (state.status === "completed") {
-          setCrawlerRunning(false);
-          setCrawlerMessage(`Crawler hoàn tất: ${state.result?.created ?? 0} tin mới, ${state.result?.updated ?? 0} tin cập nhật.`);
+        const running = state.status === "queued" || state.status === "running";
+        setCrawlerRunning(running);
+        if (state.source === "automatic" && running) {
+          setCrawlerMessage(`Backend đang tự động cào dữ liệu (${state.job || "crawler"}).`);
+        } else if (state.source === "automatic" && state.status === "completed") {
+          setCrawlerMessage(`Lượt cào tự động hoàn tất: ${state.result?.created ?? 0} tin mới, ${state.result?.updated ?? 0} tin cập nhật.`);
+        } else if (state.source === "manual" && state.status === "completed") {
+          setCrawlerMessage(`Crawler demo hoàn tất: ${state.result?.created ?? 0} tin mới, ${state.result?.updated ?? 0} tin cập nhật.`);
         } else if (state.status === "failed") {
-          setCrawlerRunning(false);
           setCrawlerMessage(`Crawler lỗi: ${state.error || "Không rõ nguyên nhân"}`);
         }
-      } catch (err) {
-        setCrawlerRunning(false);
-        setCrawlerMessage(err instanceof Error ? err.message : "Không đọc được trạng thái crawler.");
+      } catch {
+        // Keep polling through temporary API errors so an active automatic run remains visible.
       }
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [crawlerRunning]);
+    };
+    void refreshCrawlerStatus();
+    const timer = window.setInterval(() => void refreshCrawlerStatus(), 2000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   function update<K extends keyof ReturnType<typeof blankForm>>(key: K, value: ReturnType<typeof blankForm>[K]) {
     setForm(current => ({ ...current, [key]: value }));
@@ -307,8 +316,13 @@ export default function AdminAddRoomPage() {
 
     <aside className="h-fit rounded-2xl bg-white p-5 shadow-sm lg:sticky lg:top-5">
       <div className="flex items-start gap-3"><div className="rounded-xl bg-emerald-50 p-2.5 text-emerald-700"><RefreshCw size={20}/></div><div><h2 className="font-black text-slate-900">Đồng bộ crawler</h2><p className="mt-1 text-sm leading-5 text-slate-500">Lấy thêm tin mới từ nguồn đã cấu hình.</p></div></div>
+      <div className={`mt-4 rounded-xl p-3 text-sm ${crawlerProgress?.enabled === false ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-800"}`}>
+        {crawlerProgress?.enabled === false
+          ? "Crawler tự động đang tắt trong cấu hình backend."
+          : `Crawler tự động đang bật; cào tin mới mỗi ${crawlerProgress?.interval_minutes ?? 120} phút. Backfill mỗi ${crawlerProgress?.backfill_interval_hours ?? 6} giờ, làm mới dữ liệu mỗi ${crawlerProgress?.refresh_interval_hours ?? 24} giờ.`}
+      </div>
       <button disabled={crawlerRunning} onClick={() => void runCrawler()} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-60"><RefreshCw size={17} className={crawlerRunning ? "animate-spin" : ""}/>{crawlerRunning ? (crawlerProgress?.status === "queued" ? "Crawler đang chờ…" : "Crawler đang chạy…") : "Chạy crawler"}</button>
-      {crawlerProgress && <div className="mt-4" aria-live="polite">
+      {crawlerProgress && crawlerProgress.status !== "idle" && <div className="mt-4" aria-live="polite">
         <div className="mb-1 flex justify-between gap-2 text-xs text-slate-600"><span>{crawlerProgress.stage || (crawlerRunning ? "Đang xử lý" : "Hoàn tất")}</span><span>{progress}%</span></div>
         <div className="h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald-600 transition-all" style={{ width: `${progress}%` }}/></div>
         <p className="mt-1 text-xs text-slate-500">{crawlerProgress.processed ?? 0}/{crawlerProgress.target ?? 10} tin</p>

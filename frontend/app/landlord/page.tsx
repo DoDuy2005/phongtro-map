@@ -50,6 +50,7 @@ export default function LandlordPage() {
   const [confirmingRoomId, setConfirmingRoomId] = useState<string | null>(null);
   const [confirmationError, setConfirmationError] = useState("");
   const [form, setForm] = useState(emptyForm);
+  const [amenitiesText, setAmenitiesText] = useState("");
   const [tab, setTab] = useState<Tab>("rooms");
   const [editing, setEditing] = useState<string | null>(null);
   const [files, setFiles] = useState<File[]>([]);
@@ -159,6 +160,7 @@ export default function LandlordPage() {
 
   function resetForm() {
     setForm(emptyForm());
+    setAmenitiesText("");
     setEditing(null);
     setFiles([]);
     setExistingUploads([]);
@@ -206,7 +208,7 @@ export default function LandlordPage() {
         available_count: Math.min(form.available_count === "" ? Number(form.room_count) : Number(form.available_count), Number(form.room_count)),
         available: (form.available_count === "" ? Number(form.room_count) : Number(form.available_count)) > 0,
         area: form.area ? Number(form.area) : null,
-        amenities: form.amenities,
+        amenities: amenitiesText.split(",").map(value => value.trim()).filter(Boolean),
       };
       const room = editing
         ? await api<Room>(`/landlord/rooms/${editing}`, { method: "PUT", body: JSON.stringify(payload) })
@@ -303,6 +305,7 @@ export default function LandlordPage() {
       status: room.status,
       source_url: room.source_url || null,
     });
+    setAmenitiesText((room.amenities || []).join(", "));
     setSelectedAddress(room.lat != null && room.lon != null ? {
       label: room.street,
       lat: room.lat,
@@ -451,7 +454,7 @@ export default function LandlordPage() {
               </div>
 
               <label className="text-sm font-semibold text-slate-700 md:col-span-2">Tiện ích
-                <input value={form.amenities.join(", ")} onChange={e => update("amenities", e.target.value.split(",").map(value => value.trim()).filter(Boolean))} className="mt-1.5 w-full rounded-xl border border-slate-200 p-3 font-normal outline-none focus:border-sky-500" placeholder="Ví dụ: điều hòa, nóng lạnh, máy giặt" />
+                <input value={amenitiesText} onChange={e => setAmenitiesText(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 p-3 font-normal outline-none focus:border-sky-500" placeholder="Ví dụ: điều hòa, nóng lạnh, máy giặt" />
               </label>
               <label className="text-sm font-semibold text-slate-700">Số phòng còn trống
                 <input type="number" min="0" max={form.room_count || 500} value={form.available_count} onChange={e => { update("available_count", e.target.value); update("available", Number(e.target.value) > 0); }} className="mt-1.5 w-full rounded-xl border border-slate-200 p-3 font-normal outline-none focus:border-sky-500" placeholder="Nhập số phòng còn trống" />
