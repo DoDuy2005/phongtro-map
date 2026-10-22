@@ -170,10 +170,9 @@ async def lifespan(app: FastAPI):
     ensure_room_street_length()
     ensure_favorite_snapshots()
     scheduler.add_job(scheduled_room_cleanup, "interval", hours=1, id="room-retention", replace_existing=True, next_run_time=datetime.utcnow())
-    if settings.crawler_enabled:
-        scheduler.add_job(scheduled_incremental_crawl, "interval", minutes=settings.crawler_interval_minutes, id="nhatot-incremental", replace_existing=True, next_run_time=datetime.utcnow())
-        scheduler.add_job(scheduled_daily_refresh, "interval", hours=settings.crawler_refresh_interval_hours, id="nhatot-daily-refresh", replace_existing=True)
-        scheduler.add_job(scheduled_backfill, "interval", hours=settings.crawler_backfill_interval_hours, id="nhatot-backfill", replace_existing=True)
+    scheduler.add_job(scheduled_incremental_crawl, "interval", minutes=settings.crawler_interval_minutes, id="nhatot-incremental", replace_existing=True, next_run_time=datetime.utcnow())
+    scheduler.add_job(scheduled_daily_refresh, "interval", hours=settings.crawler_refresh_interval_hours, id="nhatot-daily-refresh", replace_existing=True)
+    scheduler.add_job(scheduled_backfill, "interval", hours=settings.crawler_backfill_interval_hours, id="nhatot-backfill", replace_existing=True)
     scheduler.start()
     yield
     if scheduler.running:
@@ -650,7 +649,7 @@ def get_crawler_status(user: User = Depends(require_role(UserRole.ADMIN))):
     with crawler_state_lock:
         return {
             **crawler_state,
-            "enabled": settings.crawler_enabled,
+            "enabled": True,
             "interval_minutes": settings.crawler_interval_minutes,
             "backfill_interval_hours": settings.crawler_backfill_interval_hours,
             "refresh_interval_hours": settings.crawler_refresh_interval_hours,
